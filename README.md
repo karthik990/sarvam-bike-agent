@@ -43,6 +43,15 @@ Other savings: no chat history is sent to the model, and query expansion, langua
 
 **Cost dashboard (sidebar):** total spend against budget, images analysed, **average cost per image**, last image's tokens and ₹ cost, how many more images fit in the remaining budget, average cost per answer, and a breakdown by call type. Each answer also shows its own cost, with the image part split out. Rates come from Sarvam's published INR price list (`pricing.py`, overridable via env). Rough estimates: an answer costs about ₹0.03–0.05 and a photo about ₹0.01–0.02, so ₹100 covers roughly 2,000 answers.
 
+## Conversation memory (multi-turn chat)
+
+Follow-ups like *"and the chain?"*, *"what tool do I need for it?"* or *"what if it keeps happening?"* work across prompts:
+
+- **Follow-up detection is local (0 tokens).** A reference word ("it", "that", "also", "what about"…) marks a follow-up. A new topic ("How do I check the oil?") or a new photo starts fresh.
+- **Follow-ups inherit the previous topic** for retrieval, plus the previous **photo description**, and keep the **manual sections just discussed** in play.
+- **Compact memory:** only the last 2 exchanges are sent, as *question + one-line summary*, never full answers. That adds about 60 tokens, and only on follow-ups. The model uses it just to work out what "it" refers to; facts still come from the manual.
+- Cached answers take the context into account, so the same follow-up after different questions isn't confused. **🆕 New conversation** resets memory.
+
 ## Approach
 
 ```

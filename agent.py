@@ -22,7 +22,7 @@ MIN_SCORE = float(os.getenv("MIN_BM25_SCORE", "0.3"))  # below this: refuse loca
 TOP_K = 5            # chunks retrieved
 MAX_SECTIONS = 3     # sections sent to the model
 SECTION_CHARS = 1300 # cap per section (keeps prompt ~900 tokens)
-PROMPT_VERSION = "p5"  # bump whenever the prompt/format changes -> old cached answers are ignored
+PROMPT_VERSION = "p6"  # bump whenever the prompt/format changes -> old cached answers are ignored
 
 ANSWER_SYS = """You are a service advisor answering a motorcycle owner using ONLY the manual SECTIONS provided.
 Return JSON. Rules:
@@ -36,6 +36,7 @@ Return JSON. Rules:
 - page = the number from the nearest [p.N] marker ABOVE the text you used, digits only (e.g. "82").
 - Keep it tight: at most 4 spec, 8 steps, 3 warnings, 2 service_centre items; each text under 20 words.
 - Inside text never use double quotes; use single quotes instead.
+- CONVERSATION (if given) is only for understanding what the user refers to ("it", "that step", "the other one"). Facts must still come from SECTIONS.
 - Never use knowledge outside the sections. Write the text fields in {lang}."""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},
@@ -101,6 +102,10 @@ class Result:
     api_calls: int = 0
     cached: bool = False
     reason: str = ""   # why it refused (shown in UI for debugging)
+    summary: str = ""              # one-line summary, kept as conversation memory
+    section_ids: list[int] = field(default_factory=list)  # chunks used, re-used for follow-ups
+    followup: bool = False
+    topic: str = ""                # resolved English retrieval query for this turn
 
 
 def cache_key(manual_hash: str, question: str, image_bytes: bytes | None) -> str:
@@ -227,6 +232,41 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
     return "\n".join(md), kept, dropped
 
 
+FOLLOWUP_RE = re.compile(
+    r"^(and|also|so|then|ok|okay|but|what about|how about|same|next)\b|"
+    r"\b(it|its|that|this|those|these|them|they|there|same|other one|previous|above|step \d+|again)\b")
+
+
+def is_followup(question: str, history: list[dict]) -> bool:
+    """Local, zero-token check: does this message lean on the previous turn?"""
+    if not any(m["role"] == "assistant" for m in history):
+        return False
+    return bool(FOLLOWUP_RE.search(question.lower().strip()))
+
+
+def context_signature(question: str, history: list[dict]) -> str:
+    """Part of the cache key: the same follow-up means different things after different questions."""
+    if not is_followup(question, history):
+        return ""
+    prev = next((m for m in reversed(history) if m["role"] == "user"), {})
+    return (prev.get("topic") or prev.get("content", ""))[:200]
+
+
+def _memory(history: list[dict], turns: int = 2) -> str:
+    """Compact memory: last N exchanges as 'User: question / Assistant: one-line summary'."""
+    lines, pairs = [], []
+    for m in history:
+        if m["role"] == "user":
+            pairs.append([m["content"][:160], ""])
+        elif pairs:
+            pairs[-1][1] = (m.get("summary") or m["content"])[:160].replace("\n", " ")
+    for u, a in pairs[-turns:]:
+        lines.append(f"User: {u}")
+        if a:
+            lines.append(f"Assistant: {a}")
+    return "\n".join(lines)
+
+
 def extractive_answer(sections) -> str:
     """Offline mode: show the best manual sections verbatim (0 tokens)."""
     return "**Relevant sections from your manual** (offline mode, no AI summary):\n\n" + "\n\n".join(
@@ -267,12 +307,16 @@ def answer(client, index: Index, question: str, history: list[dict], *,
             calls += 1
         except Exception as e:
             warnings.append(f"Translation failed ({str(e)[:80]}).")
-    # short follow-ups ("what about the chain?") borrow the previous question for retrieval only
-    prev_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-    refers_back = re.search(r"\b(it|that|this|those|them|same|other|also|again|what about|and)\b", q_en.lower())
-    if prev_user and len(q_en.split()) <= 5 and refers_back:
-        q_en = f"{q_en} {prev_user[:200]}"
-    base_q = q_en + (f" {img_desc}" if img_desc else "")
+    # conversation context: follow-ups inherit the previous topic, photo and manual sections
+    followup = is_followup(question, history) and not image   # a new photo starts a new topic
+    prev_user = next((m for m in reversed(history) if m["role"] == "user"), {})
+    prev_bot = next((m for m in reversed(history) if m["role"] == "assistant"), {})
+    topic = q_en
+    if followup and prev_user:
+        topic = f"{q_en} {(prev_user.get('topic') or prev_user.get('content', ''))[:200]}"
+        if not img_desc and prev_user.get("img_desc"):
+            img_desc = prev_user["img_desc"]          # "what should I do about it?" after a photo
+    base_q = topic + (f" {img_desc}" if img_desc else "")
     exp = expansion_terms(base_q)
     search_q = base_q + (f"  [+ {exp}]" if exp else "")
 
@@ -283,6 +327,13 @@ def answer(client, index: Index, question: str, history: list[dict], *,
                       warnings, calls, reason="no_text_in_pdf")
     raw = index.search(base_q, k=TOP_K, expansion=exp)
     hits = [h for h in raw if h[1] >= MIN_SCORE]
+    if followup and prev_bot.get("section_ids"):
+        # keep the sections we were just discussing in play ("sticky" context)
+        have = {c.id for c, _ in hits}
+        top = max([sc for _, sc in hits], default=MIN_SCORE + 1)
+        sticky = [(index.chunks[i], top * 1.05) for i in prev_bot["section_ids"]
+                  if 0 <= i < len(index.chunks) and i not in have][:3]
+        hits = sticky + hits
     if not hits:
         best = f"{raw[0][1]:.2f}" if raw else "no term overlap"
         if image and not img_desc:
@@ -296,11 +347,14 @@ def answer(client, index: Index, question: str, history: list[dict], *,
 
     sections = build_sections(index, hits)
     if client is None:
-        return Result(extractive_answer(sections), True, hits, None, search_q, lang, warnings, 0)
+        return Result(extractive_answer(sections), True, hits, None, search_q, lang, warnings, 0,
+                      section_ids=[x.id for s in sections for x in s["chunks"]], followup=followup, topic=topic)
 
     # 4) ONE structured call: model returns JSON, we render it locally in a fixed layout
     ctx = "\n\n".join(f"--- SECTION {i} ---\n{s['text']}" for i, s in enumerate(sections, 1))
-    user = f"SECTIONS:\n{ctx}\n\nQUESTION: {question}" + (f"\nPHOTO SHOWS: {img_desc}" if img_desc else "")
+    mem = _memory(history) if followup else ""
+    user = (f"SECTIONS:\n{ctx}\n\n" + (f"CONVERSATION:\n{mem}\n\n" if mem else "") +
+            f"QUESTION: {question}" + (f"\nPHOTO SHOWS: {img_desc}" if img_desc else ""))
     data = client.chat_structured([
         {"role": "system", "content": ANSWER_SYS.replace("{lang}", LANG_NAMES.get(lang, "English"))},
         {"role": "user", "content": user},
@@ -326,4 +380,6 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     if kept == 0:
         return Result(_refusal(lang), False, hits, img_desc, search_q, lang, warnings, calls,
                       reason="no answer item could be tied to a retrieved page, so it was withheld")
-    return Result(text, True, hits, img_desc, search_q, lang, warnings, calls)
+    return Result(text, True, hits, img_desc, search_q, lang, warnings, calls,
+                  summary=str(data.get("summary", ""))[:200],
+                  section_ids=[x.id for s in sections for x in s["chunks"]], followup=followup, topic=topic)

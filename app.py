@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent import answer, cache_key
+from agent import answer, cache_key, context_signature
 import pricing
 from rag import Index, load_pdf
 from sarvam_client import Sarvam
@@ -68,7 +68,8 @@ with st.sidebar:
         st.success(f"{ss.manual_name}: {s['pages']} pages · {s['chunks']} chunks (indexed locally, 0 tokens)")
         if s["image_only_pages"]:
             st.warning(f"{s['image_only_pages']} scanned page(s) without text can't be searched.")
-    if st.button("Clear chat"):
+    st.caption("💬 The agent remembers this conversation: ask follow-ups like 'and the chain?' or 'what's step 3?'")
+    if st.button("🆕 New conversation"):
         ss.messages = []
 
     dash = st.container()   # cost dashboard is filled at the END of the run so it's always current
@@ -118,14 +119,15 @@ if not question and img_file is not None and st.button("Ask about this photo"):
 
 if question:
     image = img_file.getvalue() if img_file is not None else None
-    history = [{"role": m["role"], "content": m["content"]} for m in ss.messages]
+    MEMORY_KEYS = ("role", "content", "summary", "section_ids", "topic", "img_desc")
+    history = [{k: m[k] for k in MEMORY_KEYS if k in m} for m in ss.messages]
     with st.chat_message("user"):
         if image:
             st.image(image, width=240)
         st.markdown(question)
     ss.messages.append({"role": "user", "content": question, "image": image})
 
-    ck = cache_key(ss.pdf_hash, question, image)
+    ck = cache_key(ss.pdf_hash, question + "|" + context_signature(question, history), image)
     with st.chat_message("assistant"):
         if client and ck in ss.answer_cache:
             r = ss.answer_cache[ck]
@@ -160,7 +162,10 @@ if question:
             if image:
                 parts.append(f"image analysis {pricing.inr(img_cost)}" + (" (cached)" if not img_cost else ""))
             st.caption(" · ".join(parts))
-            r = {"cost": total, "img_cost": img_cost, "answer": res.answer, "lang": res.language, "img": res.image_description, "query": res.query,
+            if res.followup:
+                st.caption("💬 Follow-up: used context from the previous question")
+            r = {"summary": res.summary, "section_ids": res.section_ids, "topic": res.topic,
+                 "cost": total, "img_cost": img_cost, "answer": res.answer, "lang": res.language, "img": res.image_description, "query": res.query,
                  "sources": [{"page": c.label, "heading": c.heading, "text": c.text[:600], "score": s}
                              for c, s in res.sources]}
             if res.reason:
@@ -176,7 +181,10 @@ if question:
             for s in r["sources"]:
                 st.markdown(f"**p.{s['page']}** {('— ' + s['heading']) if s['heading'] else ''} · score {s['score']:.2f}")
                 st.text(s["text"])
-    ss.messages.append({"role": "assistant", "content": r["answer"], "lang": r["lang"]})
+    # conversation memory for the next turn (kept small: topic, photo description, summary, sections)
+    ss.messages[-1].update(topic=r.get("topic") or question, img_desc=r.get("img"))
+    ss.messages.append({"role": "assistant", "content": r["answer"], "lang": r["lang"],
+                        "summary": r.get("summary", ""), "section_ids": r.get("section_ids", [])})
 
 # TTS only on explicit click (never automatic)
 if client and ss.messages and ss.messages[-1]["role"] == "assistant":

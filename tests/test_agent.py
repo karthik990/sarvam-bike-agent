@@ -127,3 +127,27 @@ def test_truncated_reply_drops_half_item():
     with mock.patch("requests.post", lambda *a, **k: R()):
         d = sc.Sarvam("k").chat_structured([{"role": "user", "content": "q"}], {}, "n")
     assert [s["text"] for s in d["steps"]] == ["Loosen nuts"]
+
+def test_followup_detection():
+    h = [{"role": "user", "content": "How do I adjust clutch free play?"}, {"role": "assistant", "content": "...", "summary": "Set 10-12 mm"}]
+    assert agent.is_followup("and what about the chain?", h)
+    assert agent.is_followup("what tool do I need for it?", h)
+    assert not agent.is_followup("clutch adjust", h)
+    assert not agent.is_followup("and the chain?", [])            # no previous answer yet
+
+def test_followup_uses_context_and_memory():
+    f = FakeSarvam(); ix = idx()
+    r1 = agent.answer(f, ix, "Why is white smoke coming from my bike?", [])
+    h = [{"role": "user", "content": "Why is white smoke coming from my bike?", "topic": r1.topic},
+         {"role": "assistant", "content": r1.answer, "summary": r1.summary, "section_ids": r1.section_ids}]
+    r2 = agent.answer(f, ix, "what should I do if it keeps happening?", h)
+    assert r2.followup and "smoke" in r2.topic
+    assert "CONVERSATION:" in f.last[-1]["content"] and "white smoke" in f.last[-1]["content"].lower()
+    assert set(r1.section_ids) & set(r2.section_ids)              # sticky sections
+    assert f.calls.count("chat") == 2                             # still one call per turn
+
+def test_new_topic_sends_no_memory():
+    f = FakeSarvam(); ix = idx()
+    h = [{"role": "user", "content": "white smoke"}, {"role": "assistant", "content": "x", "summary": "y"}]
+    agent.answer(f, ix, "How do I check the engine oil level?", h)
+    assert "CONVERSATION:" not in f.last[-1]["content"]
