@@ -22,7 +22,7 @@ MIN_SCORE = float(os.getenv("MIN_BM25_SCORE", "0.3"))  # below this: refuse loca
 TOP_K = 5            # chunks retrieved
 MAX_SECTIONS = 3     # sections sent to the model
 SECTION_CHARS = 1300 # cap per section (keeps prompt ~900 tokens)
-PROMPT_VERSION = "p3"  # bump whenever the prompt/format changes -> old cached answers are ignored
+PROMPT_VERSION = "p4"  # bump whenever the prompt/format changes -> old cached answers are ignored
 
 ANSWER_SYS = """You are a service advisor answering a motorcycle owner using ONLY the manual SECTIONS provided.
 Return JSON. Rules:
@@ -33,7 +33,8 @@ Return JSON. Rules:
 - service_centre: when the manual says to visit/contact a service centre.
 - warnings: only CAUTION/WARNING text that concerns THIS task. Ignore warnings about other topics.
 - not_covered: one short sentence on what the question asks that the sections don't cover, else "".
-- Every item's page = the section's page number shown as [p.N].
+- page = the number from the nearest [p.N] marker ABOVE the text you used, digits only (e.g. "82").
+- Keep it tight: at most 4 spec, 8 steps, 3 warnings, 2 service_centre items.
 - Never use knowledge outside the sections. Write the text fields in {lang}."""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},
@@ -112,6 +113,7 @@ def build_sections(index: Index, hits) -> list[dict]:
     its heading (and a tiny intro/spec block right before it), always keeping the hit itself and
     staying under SECTION_CHARS. Gives the model whole procedures in the manual's order."""
     chunks, used, sections = index.chunks, set(), []
+    hit_ids = {c.id for c, _ in hits}
     for c, score in sorted(hits, key=lambda x: -x[1]):
         if c.id in used:
             continue
@@ -128,8 +130,11 @@ def build_sections(index: Index, hits) -> list[dict]:
                     continue
                 x = chunks[j]
                 same = x.heading == c.heading and abs(x.page - c.page) <= 1
-                intro = j == group[0].id - 1 and len(x.text) < 250 and x.page == c.page
-                if (same or intro) and size + len(x.text) <= SECTION_CHARS:
+                # short sub-section on the same page (intro, spec block) belongs with this one
+                shared = set(re.findall(r"[A-Z]{4,}", x.heading)) & set(re.findall(r"[A-Z]{4,}", c.heading))
+                intro = len(x.text) < 600 and x.page == c.page and bool(shared)
+                related_hit = j in hit_ids and abs(x.page - c.page) <= 1   # e.g. spec block next to procedure
+                if (same or intro or related_hit) and size + len(x.text) <= SECTION_CHARS:
                     group.append(x); size += len(x.text); grew = True
                     if j == hi: hi += 1
                     else: lo -= 1
@@ -137,8 +142,11 @@ def build_sections(index: Index, hits) -> list[dict]:
                 break
         group.sort(key=lambda x: x.id)
         used.update(x.id for x in group)
-        text, labels, last_h = "", [], None
+        text, labels, last_h, last_l = "", [], None, None
         for x in group:
+            if x.label != last_l:                      # explicit page marker -> unambiguous citations
+                text += f"[p.{x.label}]\n"
+                last_l = x.label
             if x.heading != last_h and x.heading:
                 text += x.heading + "\n"
                 last_h = x.heading
@@ -151,21 +159,52 @@ def build_sections(index: Index, hits) -> list[dict]:
     return sections  # best-scoring section first
 
 
-def render(data: dict, lang: str, allowed: set[str]) -> tuple[str, int, int]:
-    """Turn the model's JSON into a consistent, readable answer. Drops items citing pages that were
-    not retrieved. Returns (markdown, kept_items, dropped_items)."""
+def _overlap_label(text: str, sources: list[tuple[str, str]]) -> str | None:
+    """Grounding by content: which retrieved chunk does this item's wording come from?"""
+    from rag import tokenize
+    t = set(tokenize(text))
+    if len(t) < 2:
+        return None
+    best, lab = 0.0, None
+    for label, src in sources:
+        o = len(t & set(tokenize(src))) / len(t)
+        if o > best:
+            best, lab = o, label
+    return lab if best >= 0.5 else None
+
+
+def resolve_page(raw, text: str, allowed: set[str], sources, pdf2label: dict) -> str | None:
+    nums = re.findall(r"\d+", str(raw))
+    for n in nums:                       # "82", "p.82", "[p.81/82]", "81-82"
+        if n in allowed:
+            return n
+    for n in nums:                       # model used the PDF page index instead of the printed one
+        if pdf2label.get(n) in allowed:
+            return pdf2label[n]
+    return _overlap_label(text, sources)  # no usable page: accept only if the wording matches a chunk
+
+
+def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=None) -> tuple[str, int, int]:
+    """Turn the model's JSON into a consistent, readable answer. Items are kept only if they can be
+    tied to a retrieved page. Returns (markdown, kept_items, dropped_items)."""
     h = HEADINGS.get(lang.split("-")[0], HEADINGS["en"])
     kept = dropped = 0
+    sources, pdf2label = sources or [], pdf2label or {}
+    render.dropped_raw = []
 
     def items(key):
         nonlocal kept, dropped
         out = []
         for it in data.get(key) or []:
-            t, pg = str(it.get("text", "")).strip(), str(it.get("page", "")).strip().lstrip("p.").strip()
+            if not isinstance(it, dict):
+                it = {"text": str(it), "page": ""}
+            t = str(it.get("text", "")).strip()
             if not t:
                 continue
-            if pg not in allowed:
+            pg = resolve_page(it.get("page", ""), t, allowed, sources, pdf2label)
+            if pg is None:
                 dropped += 1
+                render.dropped_raw.append(str(it.get("page", ""))[:12])
                 continue
             kept += 1
             out.append((t.rstrip("."), pg))
@@ -229,7 +268,8 @@ def answer(client, index: Index, question: str, history: list[dict], *,
             warnings.append(f"Translation failed ({str(e)[:80]}).")
     # short follow-ups ("what about the chain?") borrow the previous question for retrieval only
     prev_user = next((m["content"] for m in reversed(history) if m["role"] == "user"), "")
-    if len(q_en.split()) <= 5 and prev_user:
+    refers_back = re.search(r"\b(it|that|this|those|them|same|other|also|again|what about|and)\b", q_en.lower())
+    if prev_user and len(q_en.split()) <= 5 and refers_back:
         q_en = f"{q_en} {prev_user[:200]}"
     base_q = q_en + (f" {img_desc}" if img_desc else "")
     exp = expansion_terms(base_q)
@@ -258,7 +298,7 @@ def answer(client, index: Index, question: str, history: list[dict], *,
         return Result(extractive_answer(sections), True, hits, None, search_q, lang, warnings, 0)
 
     # 4) ONE structured call: model returns JSON, we render it locally in a fixed layout
-    ctx = "\n\n".join(f"[p.{'/'.join(s['labels'])}]\n{s['text']}" for s in sections)
+    ctx = "\n\n".join(f"--- SECTION {i} ---\n{s['text']}" for i, s in enumerate(sections, 1))
     user = f"SECTIONS:\n{ctx}\n\nQUESTION: {question}" + (f"\nPHOTO SHOWS: {img_desc}" if img_desc else "")
     data = client.chat_structured([
         {"role": "system", "content": ANSWER_SYS.replace("{lang}", LANG_NAMES.get(lang, "English"))},
@@ -276,9 +316,12 @@ def answer(client, index: Index, question: str, history: list[dict], *,
 
     # 5) local render + citation check (items citing non-retrieved pages are dropped)
     allowed = {l for s in sections for l in s["labels"]}
-    text, kept, dropped = render(data, lang, allowed)
+    srcs = [(x.label, x.text) for s in sections for x in s["chunks"]]
+    pdf2label = {str(x.page): x.label for s in sections for x in s["chunks"]}
+    text, kept, dropped = render(data, lang, allowed, srcs, pdf2label)
     if dropped:
-        warnings.append(f"Removed {dropped} item(s) citing pages that weren't retrieved.")
+        warnings.append(f"Removed {dropped} item(s) that couldn't be tied to a retrieved page "
+                        f"(model cited: {', '.join(sorted(set(render.dropped_raw)))[:80]}).")
     if kept == 0:
         return Result(_refusal(lang), False, hits, img_desc, search_q, lang, warnings, calls,
                       reason="no answer item could be tied to a retrieved page, so it was withheld")

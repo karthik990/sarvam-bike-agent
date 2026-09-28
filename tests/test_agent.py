@@ -95,3 +95,17 @@ def test_empty_content_retry():
     with mock.patch("requests.post", fake):
         out = sc.Sarvam("k").chat([{"role":"user","content":"x"}])
     assert out == "ok [p.1]" and calls == [450, 1350]
+
+def test_page_resolution_variants():
+    allowed = {"81", "82"}
+    srcs = [("82", "Loosen the cover end adjuster nuts at cover end completely.")]
+    assert agent.resolve_page("p.82", "x", allowed, srcs, {}) == "82"
+    assert agent.resolve_page("[p.81/82]", "x", allowed, srcs, {}) == "81"
+    assert agent.resolve_page("84", "x", allowed, srcs, {"84": "82"}) == "82"          # PDF index
+    assert agent.resolve_page("", "Loosen the cover end adjuster nuts", allowed, srcs, {}) == "82"  # by wording
+    assert agent.resolve_page("999", "Replace the spark plug", allowed, srcs, {}) is None
+
+def test_short_question_not_polluted_by_history():
+    f = FakeSarvam()
+    r = agent.answer(f, idx(), "clutch adjust", [{"role": "user", "content": "brake issues"}])
+    assert "brake" not in r.query.split("[+")[0]
