@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+.streamlit/secrets.toml
+# OEM manuals are copyrighted: keep them out of the repo
+/*.pdf
+manuals/
