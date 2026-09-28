@@ -22,7 +22,7 @@ MIN_SCORE = float(os.getenv("MIN_BM25_SCORE", "0.3"))  # below this: refuse loca
 TOP_K = 5            # chunks retrieved
 MAX_SECTIONS = 3     # sections sent to the model
 SECTION_CHARS = 1300 # cap per section (keeps prompt ~900 tokens)
-PROMPT_VERSION = "p4"  # bump whenever the prompt/format changes -> old cached answers are ignored
+PROMPT_VERSION = "p5"  # bump whenever the prompt/format changes -> old cached answers are ignored
 
 ANSWER_SYS = """You are a service advisor answering a motorcycle owner using ONLY the manual SECTIONS provided.
 Return JSON. Rules:
@@ -34,7 +34,8 @@ Return JSON. Rules:
 - warnings: only CAUTION/WARNING text that concerns THIS task. Ignore warnings about other topics.
 - not_covered: one short sentence on what the question asks that the sections don't cover, else "".
 - page = the number from the nearest [p.N] marker ABOVE the text you used, digits only (e.g. "82").
-- Keep it tight: at most 4 spec, 8 steps, 3 warnings, 2 service_centre items.
+- Keep it tight: at most 4 spec, 8 steps, 3 warnings, 2 service_centre items; each text under 20 words.
+- Inside text never use double quotes; use single quotes instead.
 - Never use knowledge outside the sections. Write the text fields in {lang}."""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},

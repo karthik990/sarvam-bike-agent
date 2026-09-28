@@ -138,7 +138,17 @@ if question:
                     res = answer(client, ss.index, question, history, image=image,
                                  english_query=english_query, lang=lang, image_desc_cache=ss.img_cache)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    msg = str(e)
+                    if "budget" in msg:
+                        st.error(msg)
+                    elif any(c in msg for c in ("429", "503")):
+                        st.error("Sarvam is busy right now (rate limit / overload). Please try again in a few seconds.")
+                    elif "403" in msg:
+                        st.error("The Sarvam API key was rejected. Check SARVAM_API_KEY.")
+                    else:
+                        st.error("Something went wrong while answering. Please try again.")
+                    with st.expander("Technical details"):
+                        st.code(msg[:800])
                     st.stop()
             for w in res.warnings:
                 st.warning(w)

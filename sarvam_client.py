@@ -33,6 +33,23 @@ class SarvamError(RuntimeError):
     pass
 
 
+def parse_json_loose(raw: str):
+    """Strict json first; then json-repair (handles unescaped quotes, missing commas, truncation)."""
+    import json
+    raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.M).strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    try:
+        import json_repair
+        return json_repair.loads(raw)
+    except Exception:
+        return {}
+
+
 def shrink_image(data: bytes, max_side: int = 512) -> tuple[bytes, str]:
     """Downscale + JPEG-compress; falls back to original bytes if Pillow is missing."""
     try:
@@ -124,9 +141,9 @@ class Sarvam:
             text = self._content(self._post("/v1/chat/completions", json_body=body), kind, CHAT_MODEL)
         return text
 
-    def chat_structured(self, messages, schema: dict, name: str, max_tokens: int = 700) -> dict:
-        """JSON-schema constrained output; falls back to json_object mode if schema mode is rejected."""
-        import json
+    def chat_structured(self, messages, schema: dict, name: str, max_tokens: int = 900) -> dict:
+        """JSON-schema constrained output. Never raises on bad JSON: repairs unescaped quotes and
+        truncated output, and drops a half-written last item if the reply was cut off."""
         fmt = {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}}
         try:
             raw = self.chat(messages, max_tokens=max_tokens, response_format=fmt)
@@ -134,12 +151,13 @@ class Sarvam:
             if "400" not in str(e):
                 raise
             raw = self.chat(messages, max_tokens=max_tokens, response_format={"type": "json_object"})
-        raw = re.sub(r"^```(?:json)?|```$", "", (raw or "").strip(), flags=re.M).strip()
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            m = re.search(r"\{.*\}", raw, re.S)
-            return json.loads(m.group(0)) if m else {}
+        self.last_raw = raw
+        data = parse_json_loose(raw)
+        if self.last_finish == "length" and isinstance(data, dict):
+            for k, v in data.items():          # cut-off reply: last item may be half-written
+                if isinstance(v, list) and v and isinstance(v[-1], dict) and not v[-1].get("page"):
+                    v.pop()
+        return data if isinstance(data, dict) else {}
 
     def to_english_keywords(self, text: str) -> str:
         """Only used for typed non-English questions (voice uses Saaras translate instead)."""

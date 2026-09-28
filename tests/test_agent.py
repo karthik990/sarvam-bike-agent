@@ -109,3 +109,21 @@ def test_short_question_not_polluted_by_history():
     f = FakeSarvam()
     r = agent.answer(f, idx(), "clutch adjust", [{"role": "user", "content": "brake issues"}])
     assert "brake" not in r.query.split("[+")[0]
+
+def test_bad_json_is_repaired_not_raised():
+    from sarvam_client import parse_json_loose
+    broken = '{"found": true, "summary": "Turn the "OFF" switch", "steps": [{"text": "Loosen nuts", "page": "82"}, {"text": "Tigh'
+    d = parse_json_loose(broken)
+    assert d["found"] is True and d["steps"][0]["page"] == "82"
+    assert parse_json_loose("") == {} and not isinstance(parse_json_loose("not json at all"), dict) or parse_json_loose("not json at all") == {}
+
+def test_truncated_reply_drops_half_item():
+    import sarvam_client as sc
+    from unittest import mock
+    class R:
+        status_code = 200; text = ""
+        def json(s): return {"choices": [{"finish_reason": "length", "message": {"content":
+            '{"found": true, "summary": "x", "steps": [{"text": "Loosen nuts", "page": "82"}, {"text": "Tigh'}}], "usage": {}}
+    with mock.patch("requests.post", lambda *a, **k: R()):
+        d = sc.Sarvam("k").chat_structured([{"role": "user", "content": "q"}], {}, "n")
+    assert [s["text"] for s in d["steps"]] == ["Loosen nuts"]
