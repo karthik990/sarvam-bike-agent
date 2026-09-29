@@ -56,6 +56,21 @@ SYNONYMS = {
     "service schedule": "periodical maintenance km months",
     "change it": "replace",
     "does not start": "engine does not start",
+    "petrol": "fuel",
+    "gas ": "fuel",
+    "tank hold": "fuel tank capacity",
+    "hold": "capacity",
+    "heavy": "weight kerb weight",
+    "weigh": "weight kerb weight",
+    "how tall": "height seat height",
+    "phone": "bluetooth mobile app tripper",
+    "navigation": "tripper bluetooth",
+    "engine light": "MIL malfunction indicator lamp",
+    "warning light": "indicator lamp MIL",
+    "wash": "washing cleaning",
+    "store": "storage",
+    "first few": "running in period",
+    "new bike": "running in period",
 }
 
 

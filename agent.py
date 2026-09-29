@@ -30,7 +30,8 @@ SECTIONS_PER_PART = 2    # sections per question when there are several
 MAX_SECTIONS = 5         # hard cap on sections in one prompt
 SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
-CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))  # strong match -> never show a bare refusal
+CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))
+WEAK_SCORE = float(os.getenv("WEAK_SCORE", "9"))  # first question matched weakly -> let the planner reword it  # strong match -> never show a bare refusal
 PROMPT_VERSION = "p11"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
@@ -43,7 +44,7 @@ Given the recent conversation and the owner's LATEST message, return JSON:
 Rules:
 - Usually ONE query. Use 2-3 when the latest message asks about different things or reports different symptoms joined by 'and' (e.g. 'tyre pressure' + 'engine oil grade'; 'ABS lamp continuously on' + 'engine does not start').
 - Keep the owner's symptom and context: after "my bike won't start", "the lights are dim too" -> "engine does not start lights dim weak horn".
-- Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance'.
+- Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance', 'fuel tank capacity' (not petrol), 'kerb weight' (not how heavy), 'running in period', 'MIL malfunction indicator lamp', 'Tripper navigation bluetooth'.
 - Do NOT add words like 'motorcycle', 'symptoms', 'troubleshooting', and do NOT guess causes or parts (no 'alternator', 'voltage').
 - If the latest message starts a new topic, do NOT carry over the old topic."""
 
@@ -221,9 +222,10 @@ def _local_plan(q_en: str, history: list[dict]) -> dict:
     return {"standalone": standalone, "queries": parts[:MAX_PARTS]}
 
 
-def plan(client, question: str, q_en: str, history: list[dict], lang: str, img_desc: str | None) -> tuple[dict, int]:
+def plan(client, question: str, q_en: str, history: list[dict], lang: str, img_desc: str | None,
+         force: bool = False) -> tuple[dict, int]:
     """Returns ({standalone, queries, language?}, api_calls)."""
-    need = PLAN_ALWAYS or has_history(history) or looks_multi(q_en) or lang != "en-IN"
+    need = force or PLAN_ALWAYS or has_history(history) or looks_multi(q_en) or lang != "en-IN"
     if client is None or not need:
         return _local_plan(q_en, history), 0
     mem = _memory(history)
@@ -631,6 +633,17 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     prev = next((m for m in reversed(history) if m["role"] == "user"), {})
     ctx_hint = (prev.get("standalone") or prev.get("content", ""))[:200] if is_dangling(question, history) else ""
     sections, hits, per_query = retrieve(index, queries, img_desc, ctx_hint)
+    best0 = max([sc for _, _, hs in per_query for _, sc in hs], default=0)
+    if client is not None and n == 0 and best0 < WEAK_SCORE:
+        # owner's wording didn't match the manual well ('how much petrol does the tank hold'):
+        # one small planner call to reword it, then keep whichever retrieval is stronger
+        p2, n2 = plan(client, question, q_en, history, lang, img_desc, force=True)
+        calls += n2
+        s2, h2, pq2 = retrieve(index, p2["queries"], img_desc, ctx_hint)
+        best2 = max([sc for _, _, hs in pq2 for _, sc in hs], default=0)
+        if best2 > best0:
+            sections, hits, per_query = s2, h2, pq2
+            standalone, queries = p2["standalone"], p2["queries"]
     if ctx_hint:
         sections = sections[:MAX_SECTIONS - 1]           # reserve one slot for the context section
         # safety net for follow-ups: one section for "this message + previous question", in case the

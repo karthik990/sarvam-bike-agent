@@ -45,6 +45,107 @@ CONVERSATIONS = {
 }
 
 
+# HELD-OUT set: questions NOT used while tuning. Casual owner wording; facts taken from the PDF text.
+# (message, expected pages or None = must refuse / say not covered, facts that must appear)
+HOLDOUT = {
+    "specs (casual wording)": [
+        ("How much petrol does the tank hold?", {"16"}, ["13"]),
+        ("At what level does the low fuel warning come on?", {"16"}, ["4"]),
+        ("How heavy is the bike?", {"18"}, ["195"]),
+        ("What's the ground clearance?", {"18"}, ["170"]),
+        ("What battery does it have?", {"84", "17"}, ["8"]),
+        ("What wattage is the halogen headlamp?", {"17"}, ["60/55"]),
+        ("What should the spark plug gap be?", {"14"}, ["0.7"]),
+    ],
+    "maintenance how-tos": [
+        ("Which brake fluid should I use?", {"19", "69"}, ["DOT 4"]),
+        ("How do I check the brake fluid level?", {"68", "69"}, ["MAX"]),
+        ("Where is the air filter and how do I get to it?", {"101"}, ["left side panel"]),
+        ("Any precautions when washing the bike?", {"105", "106"}, ["cold"]),
+        ("I won't ride for two months, how should I store it?", {"107"}, ["month"]),
+    ],
+    "new bike / electronics": [
+        ("Anything special I should do in the first few hundred km?", {"53", "54"}, []),
+        ("The engine warning light stays on after starting", {"54", "55", "109"}, ["service"]),
+        ("How do I connect my phone to the navigation pod?", {"41", "42", "43", "44", "45"}, ["bluetooth"]),
+    ],
+    "follow-up chain: fork oil": [
+        ("What oil goes in the front forks?", {"19"}, []),
+        ("and how often should it be replaced?", {"113"}, ["20", "40"]),
+    ],
+    "follow-up chain: spark plug": [
+        ("What's the recommended spark plug?", {"14"}, ["YR7MES"]),
+        ("when does it need replacing?", {"112"}, ["20"]),
+    ],
+    "hindi + multi-question": [
+        ("टायर प्रेशर कितना होना चाहिए?", {"71", "16", "104"}, ["32"]),
+        ("What's the fuel tank capacity and the kerb weight?", {"16", "18"}, ["13", "195"]),
+    ],
+    "must refuse (not in the manual)": [
+        ("How do I fix a puncture on the road?", None, []),
+        ("What is the top speed of this bike?", None, []),
+        ("What mileage does it give per litre?", None, []),
+    ],
+}
+
+
+def holdout_offline(index):
+    """Retrieval-only check on FIRST turns with the raw message (no planner involved)."""
+    total = ok = 0
+    for name, turns in HOLDOUT.items():
+        print(f"\n=== {name}")
+        for i, (msg, expected, _) in enumerate(turns):
+            if agent.detect_lang(msg) != "en-IN":
+                print(f"  ----  {msg[:55]:55} (non-English: translated by the planner, checked in --live)")
+                continue
+            if i > 0 and name.startswith("follow-up"):
+                print(f"  ----  {msg[:55]:55} (follow-up: needs the planner, checked in --live)")
+                continue
+            sections, _, per_query = agent.retrieve(index, [msg], None)
+            got = {l for s in sections for l in s["labels"]}
+            best = max([sc for _, _, hs in per_query for _, sc in hs], default=0)
+            if expected is None:
+                print(f"  INFO  {msg[:55]:55} best score {best:.1f} (model must decline) pages {sorted(got, key=lambda x: int(x) if x.isdigit() else 0)}")
+                continue
+            hit = bool(expected & got)
+            total += 1; ok += hit
+            print(f"  {'PASS' if hit else 'FAIL'}  {msg[:55]:55} want {sorted(expected)} got {sorted(got, key=lambda x: int(x) if x.isdigit() else 0)}")
+    print(f"\nHeld-out retrieval (raw first questions): {ok}/{total}")
+    return ok == total
+
+
+def holdout_live(index):
+    from sarvam_client import Sarvam
+    load_dotenv()
+    client = Sarvam(os.environ["SARVAM_API_KEY"])
+    passed = total = 0
+    for name, turns in HOLDOUT.items():
+        print(f"\n=== {name}")
+        history = []
+        for msg, expected, must in turns:
+            r = agent.answer(client, index, msg, history)
+            cited = set(re.findall(r"\(p\.(\d+)\)", r.answer))
+            low = r.answer.lower()
+            if expected is None:
+                declined = (not r.found) or ("not covered" in low and not cited)
+                good, verdict = declined, ("declined correctly" if declined else "SHOULD HAVE DECLINED")
+            else:
+                missing = [m for m in must if m.lower() not in low]
+                good = bool(cited & expected) and not missing
+                verdict = "OK" if good else f"CHECK (cited {sorted(cited)}, want {sorted(expected)}" + \
+                          (f", missing {missing})" if missing else ")")
+            total += 1; passed += good
+            print(f"\n> {msg}\n  understood as: {r.standalone} | queries: {r.queries} | calls={r.api_calls}\n  {verdict}")
+            if r.reason:
+                print(f"  reason: {r.reason}")
+            if not good and r.debug:
+                print(f"  raw model output: {r.debug[:300]!r}")
+            print("  " + r.answer.replace("\n", "\n  ")[:700])
+            history += [{"role": "user", "content": msg, "standalone": r.standalone, "img_desc": r.image_description},
+                        {"role": "assistant", "content": r.answer, "summary": r.summary}]
+    print(f"\nHeld-out live: {passed}/{total} correct. Spend: ₹{client.spent:.3f} over {len(client.ledger)} calls")
+
+
 # Answer-quality checks for the live run (beyond "cited the right page")
 QUALITY = {
     "and when should I get it checked?": {"no_steps": True, "must": ["1,000"]},
@@ -136,8 +237,11 @@ def live(index, only=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: python eval.py <manual.pdf> [--live] [--only <conversation name part>]")
+        sys.exit("usage: python eval.py <manual.pdf> [--live] [--holdout] [--only <conversation name part>]")
     only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else None
     chunks, _ = load_pdf(open(sys.argv[1], "rb").read())
     idx = Index(chunks)
-    live(idx, only) if "--live" in sys.argv else sys.exit(0 if offline(idx, only) else 1)
+    if "--holdout" in sys.argv:
+        holdout_live(idx) if "--live" in sys.argv else sys.exit(0 if holdout_offline(idx) else 1)
+    else:
+        live(idx, only) if "--live" in sys.argv else sys.exit(0 if offline(idx, only) else 1)

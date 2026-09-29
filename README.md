@@ -52,7 +52,9 @@ The agent handles follow-ups ("is it the same with a pillion?", "how often shoul
 3. **The answer comes in parts,** one per question, each with its own page citations.
 4. **Memory holds standalone questions and one-line summaries**, never whole answers and never an ever-growing topic string. This fixed the earlier drift, where turn 5 was still searching for tyre pressure.
 
-**Evaluation:** `python eval.py manual.pdf` checks 13 questions over 4 conversations (follow-ups, topic switches, multi-question messages, a troubleshooting chain) against the manual pages that hold the answers. Current result: **17/17** offline checks and **13/13** live answers citing the right page (₹0.87 for the full live run). `python eval.py manual.pdf --live` runs the same conversations on Sarvam and prints each answer, how it was understood, what it cited, and the cost (about ₹1 in total).
+**Evaluation:** `python eval.py manual.pdf` checks 13 questions over 4 conversations (follow-ups, topic switches, multi-question messages, a troubleshooting chain) against the manual pages that hold the answers. Current result: **17/17** offline checks and **13/13** live answers citing the right page (₹0.87 for the full live run). **Held-out set:** `python eval.py manual.pdf --holdout [--live]` runs 22 *new* questions that were never used for tuning. They cover casual wording ('how much petrol does the tank hold?'), specs, maintenance how-tos, electronics, follow-up chains, Hindi, multi-question messages, and 3 questions the manual doesn't cover, which must be declined. The expected facts come from the PDF text, not from the search results.
+
+`python eval.py manual.pdf --live` runs the same conversations on Sarvam and prints each answer, how it was understood, what it cited, and the cost (about ₹1 in total).
 
 ## Approach
 

@@ -69,9 +69,22 @@ def test_image_adds_one_call_and_is_cached():
     agent.answer(f, idx(), "Why is this smoke coming?", [], image=b"img", image_desc_cache=cache)
     assert f.calls.count("image") == 1
 
-def test_out_of_scope_refused_locally_zero_calls():
+def test_out_of_scope_refused_without_an_answer_call():
+    """Weak first question -> one small planner call to reword it; still nothing -> refuse, no answer call."""
     f = FakeSarvam(); r = agent.answer(f, idx(), "How do I pair bluetooth with my phone app?", [])
-    assert not r.found and f.calls == [] and r.reason.startswith("retrieval")
+    assert not r.found and f.calls == ["plan"] and r.reason.startswith("retrieval")
+
+def test_offline_out_of_scope_zero_calls():
+    r = agent.answer(None, idx(), "How do I pair bluetooth with my phone app?", [])
+    assert not r.found and r.api_calls == 0
+
+def test_weak_first_question_is_reworded_by_planner():
+    """'how much petrol does the tank hold'-style gap: planner rewords, stronger retrieval wins."""
+    class Reword(FakeSarvam):
+        def chat_json(self, *a, **k):
+            self.calls.append("plan"); return {"standalone": "What causes white smoke from the exhaust?", "queries": ["white smoke exhaust"]}
+    f = Reword(); r = agent.answer(f, idx(), "why is there vapour coming out the back?", [])
+    assert f.calls[0] == "plan" and r.queries == ["white smoke exhaust"] and r.found
 
 def test_offline_mode_zero_calls():
     r = agent.answer(None, idx(), "engine does not start", [])
