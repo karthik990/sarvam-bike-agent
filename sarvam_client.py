@@ -204,6 +204,18 @@ class Sarvam:
         return self._content(self._post("/v2/chat/completions", json_body=body), "image", VISION_MODEL)
 
     # ---------- speech ----------
+    def transcribe(self, audio_bytes: bytes, filename: str = "q.wav") -> tuple[str, str | None]:
+        """Saaras transcribe mode, language auto-detected: works for English AND Indian languages.
+        Returns (transcript in the spoken language, detected BCP-47 code)."""
+        self.usage["stt_calls"] += 1
+        resp = self._post(
+            "/speech-to-text",
+            files={"file": (filename, audio_bytes, "audio/wav")},
+            data={"model": "saaras:v3", "mode": "transcribe", "language_code": "unknown"},
+        )
+        self._log("stt", "saaras:v3", cost=pricing.stt_cost(_wav_seconds(audio_bytes)))
+        return resp.get("transcript", ""), resp.get("language_code")
+
     def transcribe_to_english(self, audio_bytes: bytes, filename: str = "q.wav") -> tuple[str, str | None]:
         """Saaras translate mode: any Indian language speech -> English text + detected language."""
         self.usage["stt_calls"] += 1

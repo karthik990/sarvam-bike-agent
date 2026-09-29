@@ -12,11 +12,12 @@ import pricing
 import rag
 import sarvam_client
 import agent
+import voice
 
 # Streamlit re-runs app.py on every interaction but keeps imported modules cached. After a redeploy
 # (e.g. a git push) that can leave an OLD agent.py in memory next to a NEW app.py. Reload our own
 # modules in dependency order so the app always runs one consistent version of the code.
-for _m in (pricing, rag, sarvam_client, agent):
+for _m in (pricing, rag, sarvam_client, agent, voice):
     importlib.reload(_m)
 
 from agent import answer, cache_key, context_signature  # noqa: E402
@@ -113,21 +114,28 @@ c1, c2 = st.columns(2)
 with c1:
     img_file = st.file_uploader("Optional: photo of the problem", type=["png", "jpg", "jpeg", "webp"], key=f"img_{n}")
 with c2:
-    audio = st.audio_input("Optional: ask by voice", key=f"aud_{n}") if hasattr(st, "audio_input") else None
+    audio = None
+    if hasattr(st, "audio_input"):
+        try:
+            audio = st.audio_input("Optional: ask by voice (any Indian language, up to 30 s)", key=f"aud_{n}",
+                                   sample_rate=16000)
+        except TypeError:                  # older Streamlit without sample_rate
+            audio = st.audio_input("Optional: ask by voice (any Indian language, up to 30 s)", key=f"aud_{n}")
 
 typed = st.chat_input("Describe the problem, e.g. 'My bike won't start, what should I check?'")
 question, english_query, lang = typed, None, None
 
-if not question and audio is not None and client:
+if not question and audio is not None:
     ah = hashlib.md5(audio.getvalue()).hexdigest()
     if ah not in ss.seen_audio:            # never re-transcribe the same clip on a rerun
-        ss.seen_audio.add(ah)
         with st.spinner("Transcribing (Saaras)…"):
-            try:
-                english_query, lang = client.transcribe_to_english(audio.getvalue())
-                question = english_query
-            except Exception as e:
-                st.error(f"Transcription failed: {e}")
+            vr = voice.voice_to_question(client, audio.getvalue())
+        ss.seen_audio.add(ah)               # handled once; recording a new clip always works
+        if vr.question:
+            question, english_query, lang = vr.question, vr.english_query, vr.lang
+            ss.voice_note = vr.message
+        else:
+            getattr(st, vr.level)(vr.message)   # visible reason instead of silently doing nothing
 if not question and img_file is not None and st.button("Ask about this photo"):
     question = "What is wrong in this photo and what should I do?"
 
@@ -135,6 +143,8 @@ if question:
     image = img_file.getvalue() if img_file is not None else None
     MEMORY_KEYS = ("role", "content", "summary", "standalone", "img_desc")
     history = [{k: m[k] for k in MEMORY_KEYS if k in m} for m in ss.messages]
+    if ss.get("voice_note"):
+        st.caption(ss.pop("voice_note"))
     with st.chat_message("user"):
         if image:
             st.image(image, width=240)
