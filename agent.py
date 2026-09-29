@@ -322,7 +322,8 @@ def _schedule_hit(index: Index, query: str):
         if not rows and not SCHEDULE_RE.search(c.heading):
             continue
         for row in rows or c.text.splitlines():
-            name = row.split(":")[0] if row.startswith("Maintenance item") and ":" in row else row
+            body = re.sub(r"^Maintenance item(?:\s+\d+\.)?\s*:?\s*", "", row)     # both row formats
+            name = body.split(":")[0] if row.startswith("Maintenance item") and ":" in body else body
             toks = set(tokenize(name))
             score = len(subject & toks) / len(subject) + 0.1 * len(subject & set(tokenize(row)))
             if score > best:

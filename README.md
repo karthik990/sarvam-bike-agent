@@ -49,9 +49,18 @@ Nothing in the code is tied to one brand. The loader reads each manual's own lay
 
 - **Headings are detected adaptively.** It measures what this manual uses consistently: ALL CAPS (Royal Enfield), a larger font (most brands) or short bold titles. Using one signal per manual stops table headers or bold body text from being taken as headings.
 - **Page numbers** are read from the top *or* bottom of the page. Repeated headers and footers (model name, chapter title) are removed by frequency.
-- **Maintenance schedules** are rebuilt from the table grid for any layout (0.5/5/10 or 750/3,000/6,000 km columns, optional months row). Codes are expanded with the legend printed on the page ('I = Inspect'), and blank cells are kept.
+- **Maintenance schedules** are rebuilt from the table for any layout. Codes are matched to km columns by their position on the page, so finely split grids work (0.5/5/10 or 750/3,000/6,000 km columns, optional months row). Codes are expanded with the legend printed on the page ('I = Inspect'), and blank cells are kept.
 - **The troubleshooting section** is recognised under any common name ('Troubleshooting', 'Trouble Shooting', 'Fault finding').
 - **Prompts and synonyms are brand-neutral.** The answer-format example uses placeholders, never real values, so one bike's numbers can't leak into another's answer.
+
+**Validated on a second manufacturer:** on the Honda Shine 100 owner's manual, with no Honda-specific code, 20/20 held-out questions reached the right page (`python eval.py <honda.pdf> --set honda`). It also exposed general bugs, now fixed and covered by tests:
+
+- schedule codes must be matched to km columns by position on the page, not by grid column;
+- '×' multiplication-sign units;
+- '–' empty cells must not be read as a legend;
+- a legend printed on another page applies to the whole manual;
+- capitalised part numbers are not headings;
+- value questions should favour the specifications section.
 
 `tests/test_universal.py` checks all of this on a synthetic manual for a fictional 'Acme Roadster 150' with a deliberately different layout. A test also fails if any brand-specific string appears in the prompts or vocabulary.
 

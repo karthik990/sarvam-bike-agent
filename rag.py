@@ -60,8 +60,11 @@ SYNONYMS = {
     "gas ": "fuel",
     "tank hold": "fuel tank capacity",
     "hold": "capacity",
-    "heavy": "weight kerb weight",
-    "weigh": "weight kerb weight",
+    "heavy": "weight kerb curb weight",
+    "weigh": "weight kerb curb weight",
+    "take": "capacity",
+    "litres": "capacity",
+    "liters": "capacity",
     "how tall": "height seat height",
     "phone": "bluetooth mobile app usb charging",
     "navigation": "navigation bluetooth app",
@@ -140,7 +143,11 @@ def _is_heading(line: str, size: float | None = None, bold: bool = False, body: 
     if letters < 0.6 * len(s.replace(" ", "")):
         return False
     words = s.split()
-    caps = "caps" in modes and len(s) >= 4 and s.isupper()
+    # part numbers / codes in capitals ('CPR7EA-9 (NGK)', 'ETZ4 / ATZ4L') are table values, not headings
+    codey = sum(bool(re.search(r"[A-Za-z]", w) and re.search(r"\d", w)) for w in words) >= max(1, len(words) / 2)
+    emphasised = bool(bold or (size and body and size >= body * 1.05))
+    caps = ("caps" in modes and len(s) >= 4 and s.isupper() and not codey
+            and (modes == frozenset({"caps"}) or emphasised))    # mixed-style manual: caps must also stand out
     big = "big" in modes and bool(size and body and size >= body * 1.15 and len(words) <= 12)
     bold_title = "bold" in modes and bool(bold and len(words) <= 10 and s[0].isupper() and not s.endswith(":"))
     return caps or big or bold_title
@@ -272,11 +279,29 @@ def _is_num(cell: str) -> bool:
     return bool(_NUM.match(cell or ""))
 
 
-def generic_schedule(page, page_text: str) -> list[str]:
-    """Rebuild ANY service/maintenance schedule table (not just one brand's layout) into sentences.
-    Finds a header row of odometer values (e.g. 0.5/5/10 or 750/3,000/6,000), an optional months row,
-    and rows of short codes (R/I/C/A/L, check marks...). Codes are expanded with the legend printed
-    on the page when there is one ('I = Inspect', 'R : Replace')."""
+def _legend(page_text: str) -> dict:
+    """Code legend printed on the page: 'I : Inspect', 'R = Replace', 'I = Inspect R = Replace ...'.
+    Only ':' or '=' count as separators (a '–' is an empty table cell in many manuals, not a legend)."""
+    legend = {}
+    for code, word in re.findall(r"(?<![A-Za-z])([A-Z]{1,2}|[✓✔•*])\s*[:=]\s*([A-Z][a-z]+)", page_text):
+        legend.setdefault(code, word)
+    if len(legend) < 2:
+        legend = dict(CODE_NAMES) if re.search(r"\binspect", page_text, re.I) else {}
+    return legend
+
+
+def _cx(cell) -> float:
+    return (cell[0] + cell[2]) / 2
+
+
+def generic_schedule(page, page_text: str, doc_legend: dict | None = None) -> list[str]:
+    """Rebuild ANY service/maintenance schedule table into sentences.
+
+    Columns are matched by POSITION ON THE PAGE, not by column index: many manuals split the grid
+    finely, so a code printed under '6' can sit in a different grid column than the '6' heading.
+    Handles: odometer header rows ('× 1,000 km 1 6 12 ...' or '750 3,000 6,000'), a months row,
+    extra header rows (miles), extra labelled columns ('Pre-ride Check', 'Annual Check'), note cells
+    ('500 km (300mi): I L') and the legend printed on the page."""
     import contextlib, io
     if not re.search(r"\bkm|kms|kilomet|odometer", page_text, re.I):
         return []
@@ -285,48 +310,90 @@ def generic_schedule(page, page_text: str) -> list[str]:
             tables = page.find_tables().tables
     except Exception:
         return []
-    legend = {}
-    for code, word in re.findall(r"(?<![A-Za-z])([A-Z]{1,2}|[✓✔•*])\s*[:=–-]\s*([A-Z][a-z]+(?:\s+[a-z]+)?)", page_text):
-        legend.setdefault(code, word)
-    if len(legend) < 2:
-        legend = dict(CODE_NAMES) if re.search(r"\binspect", page_text, re.I) else {}
+    legend = _legend(page_text)
+    if doc_legend and (len(legend) < 2 or legend == CODE_NAMES):
+        legend = doc_legend                     # legend printed on another page of the same manual
+    word = lambda c: " & ".join(legend.get(x.strip(), x.strip()) for x in re.split(r"&|/", c) if x.strip())
     out = []
     for t in tables:
-        rows = [[(c or "").replace("\n", " ").strip() for c in r] for r in t.extract()]
-        header_i = next((i for i, r in enumerate(rows) if sum(_is_num(c) for c in r) >= 3), None)
-        if header_i is None:
+        texts = [[(c or "").replace("\n", " ").strip() for c in r] for r in t.extract()]
+        boxes = [r.cells for r in t.rows]
+        num_rows = [i for i, r in enumerate(texts) if sum(_is_num(c) for c in r) >= 3]
+        if not num_rows:
             continue
-        cols = [j for j, c in enumerate(rows[header_i]) if _is_num(c)]
-        head_txt = " ".join(rows[header_i]).lower() + " " + page_text.lower()[:2000]
-        unit = " thousand km" if re.search(r"x\s*1[,.]?000", head_txt) else (" km" if "km" in head_txt else "")
-        months = None
-        for r in rows[header_i + 1:header_i + 3]:
-            if any("month" in c.lower() for c in r) and sum(_is_num(r[j]) for j in cols if j < len(r)) >= 3:
-                months = [r[j] if j < len(r) else "" for j in cols]
-        for r in rows[header_i + 1:]:
-            if months is not None and any("month" in c.lower() for c in r):
+        h = num_rows[0]
+        head = [(texts[h][j], boxes[h][j]) for j in range(len(texts[h])) if _is_num(texts[h][j]) and boxes[h][j]]
+        if len(head) < 3:
+            continue
+        row_label = " ".join(c for c in texts[h] if c and not _is_num(c)).lower()
+        unit_src = row_label + " " + page_text.lower()[:3000]
+        unit = " thousand km" if re.search(r"[x×]\s*1[,.\s]?000", unit_src) else (" km" if "km" in unit_src else "")
+        span_lo, span_hi = min(b[0] for _, b in head), max(b[2] for _, b in head)
+
+        def col_of(cell):
+            """header value whose cell contains this cell's centre (else the nearest one)."""
+            x = _cx(cell)
+            for v, b in head:
+                if b[0] - 1 <= x <= b[2] + 1:
+                    return v
+            v, b = min(head, key=lambda hb: abs(_cx(hb[1]) - x))
+            return v if abs(_cx(b) - x) <= (b[2] - b[0]) else None
+
+        months = {}
+        for i in num_rows[1:]:
+            if any("month" in c.lower() for c in texts[i]):
+                for j, c in enumerate(texts[i]):
+                    if _is_num(c) and boxes[i][j]:
+                        v = col_of(boxes[i][j])
+                        if v:
+                            months[v] = c
+        # extra labelled columns from the rows above the header ('Pre-ride Check', 'Annual Check')
+        extra = []
+        for i in range(h):
+            for j, c in enumerate(texts[i]):
+                b = boxes[i][j]
+                if c and b and not (span_lo - 1 <= _cx(b) <= span_hi + 1) and not re.match(r"items?$|refer|page", c, re.I):
+                    extra.append((re.sub(r"\s+P\.?$", "", c).strip(), b))
+        for i, r in enumerate(texts):
+            if i <= h or i in num_rows:
                 continue
-            codes = [r[j] if j < len(r) else "" for j in cols]
-            if not any(codes) or any(len(c) > 8 for c in codes):
+            cells = [(c, boxes[i][j]) for j, c in enumerate(r) if c and boxes[i][j]]
+            if not cells:
                 continue
-            name_cells = [c for j, c in enumerate(r) if j not in cols and c and not c.isdigit()]
-            if not name_cells:
+            name = cells[0][0]
+            if len(name) <= 3 or _is_num(name):
                 continue
-            name = max(name_cells, key=len)
-            groups: dict[str, list[tuple[str, str]]] = {}
-            for j, c in enumerate(codes):
-                if c:
-                    groups.setdefault(c, []).append((rows[header_i][cols[j]], months[j] if months else ""))
+            inside = [(c, b) for c, b in cells[1:] if span_lo - 1 <= _cx(b) <= span_hi + 1]
+            outside = [(c, b) for c, b in cells[1:] if not (span_lo - 1 <= _cx(b) <= span_hi + 1)]
             parts = []
-            for c, vals in groups.items():
-                word = " & ".join(legend.get(x.strip(), x.strip()) for x in re.split(r"&|/", c))
-                at = ", ".join(v for v, _ in vals)
-                mo = ", ".join(m for _, m in vals if m)
-                parts.append(f"{word} at {at}{unit}" + (f" ({mo} months)" if mo else ""))
-            out.append(f"Maintenance item: {name}: " + "; ".join(parts) + ".")
-            generic_schedule.used_labels.update({name} | {c for c in rows[header_i] if c and not _is_num(c)})
-            if months is not None:
-                generic_schedule.used_labels.update(c for c in rows[header_i + 1] if c and not _is_num(c))
+            for c, b in outside:                      # codes under extra labelled columns
+                if len(c) <= 3 and not c.isdigit() and c not in "–-":
+                    lab = next((l for l, lb in extra if lb[0] - 2 <= _cx(b) <= lb[2] + 2), "")
+                    if lab:
+                        parts.append(f"{word(c)} ({lab.lower()})")
+            if any(len(c) > 3 and not _is_num(c) for c, _ in inside):
+                # a note spanning the odometer columns, e.g. '500 km (300mi): I L'
+                note = " ".join(c for c, _ in inside)
+                note = re.sub(r"(?<![A-Za-z])([A-Z]{1,2})(?![A-Za-z])", lambda m: legend.get(m.group(1), m.group(1)), note)
+                parts.append(f"every {note}")
+            else:
+                groups: dict[str, list[str]] = {}
+                for c, b in inside:
+                    if c in "–-" or len(c) > 3:
+                        continue
+                    v = col_of(b)
+                    if v and v not in groups.get(c, []):
+                        groups.setdefault(c, []).append(v)
+                for c, vals in groups.items():
+                    mo = [months[v] for v in vals if v in months]
+                    parts.append(f"{word(c)} at {', '.join(vals)}{unit}" + (f" ({', '.join(mo)} months)" if mo else ""))
+            if parts:
+                out.append(f"Maintenance item: {name}: " + "; ".join(parts) + ".")
+                generic_schedule.used_labels.update({name} | {c for c, _ in cells})
+        for i in range(h + 1):
+            generic_schedule.used_labels.update(c for c in texts[i] if c)
+        for i in num_rows:
+            generic_schedule.used_labels.update(c for c in texts[i] if c and not _is_num(c))
     return out
 
 
@@ -372,6 +439,12 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
         for t, sz, _ in sl:
             sizes[round(sz, 1)] += len(t)
     body_size = sizes.most_common(1)[0][0] if sizes else None
+    doc_legend = {}
+    for pl in pages:                            # a code legend printed anywhere applies to the whole manual
+        lg = _legend("\n".join(pl))
+        if len(lg) >= 3 and lg != CODE_NAMES:
+            doc_legend = lg
+            break
     modes = choose_heading_modes(styled, body_size)
 
     # lines repeated on many pages = running header/footer (model name, chapter title...)
@@ -405,7 +478,7 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
         lines = normalize_maintenance(lines, mstate)
         if not mstate.get("km") and not any(l.startswith("Maintenance item") for l in lines):
             generic_schedule.used_labels = set()
-            sched = generic_schedule(doc[pno - 1], "\n".join(lines))
+            sched = generic_schedule(doc[pno - 1], "\n".join(lines), doc_legend)
             if sched:
                 # table cells (codes, odometer numbers, row labels) are replaced by the rebuilt sentences
                 used = generic_schedule.used_labels
@@ -425,7 +498,7 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
                     flush(pno, label, body)
                     body = []
                 # consecutive heading lines (wrapped or sub-headings) are merged
-                heading = (heading + " " + l) if pending_heading else l
+                heading = (heading + " " + l) if pending_heading and l not in heading else (heading if pending_heading else l)
                 pending_heading = True
             else:
                 pending_heading = False
@@ -436,6 +509,11 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
 
 
 SYNONYM_ONLY_MIN = 2.5
+SPEC_HEAD_RE = re.compile(r"specification|technical data|service data|spec sheet", re.I)
+VALUE_Q_RE = re.compile(r"\b(what|which|how much|how many|how heavy|capacity|pressure|gap|weight|weigh|size|"
+                        r"rating|grade|dimension|clearance|litres?|liters?|wattage|voltage)\b", re.I)
+ACTION_Q_RE = re.compile(r"\b(how (do|to|can|should) i|adjust|replace|remove|install|fix|won'?t|doesn'?t|not work|"
+                         r"what should i do|what to do|how often|when should)\b", re.I)
 
 
 class Index:
@@ -484,6 +562,12 @@ class Index:
                 bonus = sum(w for ph, w in phrases.items() if ph in low)
                 if bonus:
                     scores[i] += bonus
+        # the specifications section is authoritative for VALUE questions ('what tyre pressure',
+        # 'how many litres', 'which spark plug'); every manual has one, whatever it's called
+        if VALUE_Q_RE.search(query) and not ACTION_Q_RE.search(query):
+            for i, c in enumerate(self.chunks):
+                if scores[i] > 0 and SPEC_HEAD_RE.search(c.heading):
+                    scores[i] *= 1.6
         # the troubleshooting table is authoritative for SYMPTOMS (not for maintenance questions)
         if set(q) & SYMPTOM_TERMS:
             for i, c in enumerate(self.chunks):

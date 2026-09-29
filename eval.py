@@ -89,10 +89,58 @@ HOLDOUT = {
 }
 
 
-def holdout_offline(index):
+# Held-out set for a DIFFERENT manufacturer: Honda Shine 100 owner's manual (Apr 2023).
+# Written without looking at retrieval results; facts/pages taken from the PDF text (printed page numbers).
+HONDA_SHINE100 = {
+    "specs (casual wording)": [
+        ("What tyre pressure should I run?", {"100"}, ["25", "33"]),
+        ("What's the tyre pressure when I carry a passenger?", {"100"}, ["41"]),
+        ("How many litres does the tank take?", {"99"}, ["9"]),
+        ("How much does the bike weigh?", {"99"}, ["99"]),
+        ("What's the ground clearance?", {"99"}, ["168"]),
+        ("Which spark plug does it use and what gap?", {"100", "50"}, ["0.8"]),
+        ("Which engine oil should I use?", {"100", "38"}, ["10W-30"]),
+        ("How much oil does the engine take?", {"100"}, ["0.75"]),
+        ("How much drive chain slack is allowed?", {"100", "64", "65", "66", "67"}, ["20"]),
+        ("What rating is the main fuse?", {"101", "85"}, ["15"]),
+    ],
+    "maintenance intervals (schedule table)": [
+        ("How often should the engine oil be changed?", {"32"}, ["6"]),
+        ("When should I replace the spark plug?", {"32"}, ["12"]),
+        ("How often do I replace the air filter?", {"32"}, ["18"]),
+    ],
+    "problems": [
+        ("My bike won't start", {"74"}, []),
+        ("I got a puncture, what should I do?", {"76", "77", "78", "79", "80", "81"}, []),
+        ("The battery keeps going dead", {"82"}, []),
+        ("The engine warning light is blinking", {"75"}, []),
+    ],
+    "follow-up chain: oil": [
+        ("What oil should I use?", {"100", "38"}, ["10W-30"]),
+        ("and how much of it goes in?", {"100"}, ["0.75"]),
+    ],
+    "follow-up chain: chain": [
+        ("How do I adjust the drive chain?", {"64", "65", "66", "67"}, []),
+        ("how often should it be lubricated?", {"32", "64", "65", "66", "67"}, ["500"]),
+    ],
+    "hindi + multi-question": [
+        ("टायर प्रेशर कितना होना चाहिए?", {"100"}, ["25"]),
+        ("What's the tank capacity and the kerb weight?", {"99"}, ["9", "99"]),
+    ],
+    "must refuse (not in this manual)": [
+        ("What is the top speed?", None, []),
+        ("How do I pair my phone over Bluetooth?", None, []),
+        ("What mileage does it give per litre?", None, []),
+    ],
+}
+SETS = {"re": HOLDOUT, "honda": HONDA_SHINE100}
+
+
+def holdout_offline(index, dataset=None):
+    dataset = dataset or HOLDOUT
     """Retrieval-only check on FIRST turns with the raw message (no planner involved)."""
     total = ok = 0
-    for name, turns in HOLDOUT.items():
+    for name, turns in dataset.items():
         print(f"\n=== {name}")
         for i, (msg, expected, _) in enumerate(turns):
             if agent.detect_lang(msg) != "en-IN":
@@ -114,12 +162,13 @@ def holdout_offline(index):
     return ok == total
 
 
-def holdout_live(index):
+def holdout_live(index, dataset=None):
+    dataset = dataset or HOLDOUT
     from sarvam_client import Sarvam
     load_dotenv()
     client = Sarvam(os.environ["SARVAM_API_KEY"])
     passed = total = 0
-    for name, turns in HOLDOUT.items():
+    for name, turns in dataset.items():
         print(f"\n=== {name}")
         history = []
         for msg, expected, must in turns:
@@ -237,11 +286,12 @@ def live(index, only=None):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: python eval.py <manual.pdf> [--live] [--holdout] [--only <conversation name part>]")
+        sys.exit("usage: python eval.py <manual.pdf> [--live] [--holdout | --set re|honda] [--only <conversation name part>]")
     only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else None
     chunks, _ = load_pdf(open(sys.argv[1], "rb").read())
     idx = Index(chunks)
-    if "--holdout" in sys.argv:
-        holdout_live(idx) if "--live" in sys.argv else sys.exit(0 if holdout_offline(idx) else 1)
+    if "--holdout" in sys.argv or "--set" in sys.argv:
+        ds = SETS[sys.argv[sys.argv.index("--set") + 1]] if "--set" in sys.argv else HOLDOUT
+        holdout_live(idx, ds) if "--live" in sys.argv else sys.exit(0 if holdout_offline(idx, ds) else 1)
     else:
         live(idx, only) if "--live" in sys.argv else sys.exit(0 if offline(idx, only) else 1)

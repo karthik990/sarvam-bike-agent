@@ -23,7 +23,7 @@ def test_layout_is_detected_not_assumed():
     assert "big" in stats["heading_style"]                       # Title Case headings via font size
     heads = {c.heading for c in chunks}
     assert {"Tyre Pressure", "Checking Engine Oil", "Trouble Shooting", "Periodic Maintenance Schedule"} <= heads
-    assert {c.label for c in chunks} == {"1", "2", "3", "4", "5"}  # page numbers printed at the BOTTOM
+    assert {c.label for c in chunks} == {"1", "2", "3", "4", "5", "6"}  # page numbers printed at the BOTTOM
     assert not any("Acme Roadster 150 - Owner's Manual" in c.text for c in chunks)   # running footer removed
 
 def test_any_schedule_table_is_rebuilt_with_its_own_legend():
@@ -71,3 +71,34 @@ def test_end_to_end_interval_answer_on_other_manual():
     r = agent.answer(m, idx, "How often should I change the engine oil?", [])
     assert "Engine oil: Replace at 750, 6,000, 12,000 km" in m.prompt
     assert r.found and "(p.5)" in r.answer and "12,000" in r.answer
+
+
+# ---------- lessons from a real second manufacturer's manual (Honda Shine 100) ----------
+def test_split_grid_schedule_aligned_by_position_with_legend_from_other_page():
+    chunks, _, _ = other()
+    text = "\n".join(c.text for c in chunks if c.label == "6")
+    assert "Brake shoes: Inspect (pre-ride check); Inspect at 6, 18 thousand km." in text   # offset codes, '×' unit
+    assert "Clutch cable: Inspect (pre-ride check); Inspect at 1, 6, 12, 18 thousand km." in text
+    assert "Drive chain lube: Inspect (pre-ride check); every 500 km: Inspect Lubricate." in text   # note cell
+    assert "Fuel" not in text and "–" not in text           # '–' empty cells never read as legend/codes
+
+def test_caps_part_numbers_are_not_headings_in_font_size_manuals():
+    chunks, _, _ = other()
+    heads = {c.heading for c in chunks}
+    assert not any(h in heads for h in ("CPR8EA-9 (NGK)", "YTZ5S / GTZ5S", "BATTERY"))
+    spec = next(c for c in chunks if c.heading == "Specifications")
+    assert "CPR8EA-9 (NGK)" in spec.text                   # kept as content of the spec section
+
+def test_interval_lookup_handles_both_row_formats():
+    from rag import Chunk, Index
+    idx = Index([Chunk(0, 1, "Schedule", "Maintenance item: Engine Oil: Replace at 1, 6, 12 thousand km."),
+                 Chunk(1, 2, "Schedule", "Maintenance item 3. Spark plug: Replace at 20, 40 thousand km."),
+                 Chunk(2, 3, "Engine Oil", "Check the engine oil level with the dipstick.")])
+    assert agent._schedule_hit(idx, "How often should the engine oil be changed?")[0].id == 0
+    assert agent._schedule_hit(idx, "When should the spark plug be replaced?")[0].id == 1
+
+def test_value_questions_prefer_the_specifications_section():
+    _, _, idx = other()
+    for q in ("What tyre pressure should I run?", "How much does the bike weigh?", "How many litres does the tank take?"):
+        secs, _, _ = agent.retrieve(idx, [q], None)
+        assert {"2"} & set(secs[0]["labels"]), q      # specs / tyre-pressure page first
