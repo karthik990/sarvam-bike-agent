@@ -348,3 +348,14 @@ def test_steps_differing_only_by_number_are_kept():
           "steps": [P("Tighten nut to 10 Nm", "8"), P("Tighten nut to 20 Nm", "8")]}]}
     md, _, _ = agent.render(d, "en-IN", {"8"})
     assert "10 Nm" in md and "20 Nm" in md
+
+def test_spec_consequences_and_actions_move_out():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "s", "service_centre": [], "warnings": [],
+          "spec": [P("Chain slackness beyond 30 mm will lead to chain slippage", "8"), P("Unwind hand adjuster 4 full turns", "8"),
+                   P("25 - 30 mm", "8"), P("Replace at 0.5, 10 thousand km", "8")],
+          "steps": [P("Replace with same rating", "8"), P("Replace fuse with same rating", "8")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"8"})
+    spec = md.split("**📏")[1].split("**🔧")[0]
+    assert "25 - 30 mm" in spec and "Replace at 0.5" in spec and "will lead" not in spec and "Unwind" not in spec
+    assert "will lead" in md.split("**⚠️")[1] and md.lower().count("same rating") == 1

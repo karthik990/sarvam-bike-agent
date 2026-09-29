@@ -289,6 +289,11 @@ def build_sections(index: Index, hits, max_sections: int = SECTIONS_SINGLE, used
             text += x.text + "\n"
             if x.label not in labels:
                 labels.append(x.label)
+        same_page = next((x for x in sections if set(labels) <= set(x["labels"])), None)
+        if same_page and len(same_page["text"]) + len(text) <= int(SECTION_CHARS * 1.6):
+            same_page["text"] += "\n" + re.sub(r"^\[p\.[^\]]+\]\n", "", text.strip())   # same page: merge
+            same_page["chunks"] = sorted(same_page["chunks"] + group, key=lambda x: x.id)
+            continue
         sections.append({"labels": labels, "text": text.strip(), "score": score, "chunks": group})
         if len(sections) >= max_sections:
             break
@@ -317,6 +322,12 @@ def retrieve(index: Index, queries: list[str], img_desc: str | None, context: st
         qq = q + (f" {img_desc}" if img_desc and i == 0 else "")
         exp = (expansion_terms(qq) + " " + context).strip()
         hits = [h for h in index.search(qq, k=TOP_K, expansion=exp) if h[1] >= MIN_SCORE]
+        from rag import tokenize, SYMPTOM_TERMS
+        if set(tokenize(qq)) & SYMPTOM_TERMS:
+            ts = [h for h in hits if "TROUBLESHOOT" in h[0].heading]
+            if ts and hits and hits[0] is not ts[0]:
+                top = hits[0][1]
+                hits = [(ts[0][0], top * 1.02)] + [h for h in hits if h is not ts[0]]
         if INTERVAL_RE.search(q):
             sh = _schedule_hit(index, q)
             if sh and all(sh[0].id != c.id for c, _ in hits):
@@ -422,7 +433,12 @@ def tidy(spec, steps, warn, svc):
     - list lengths are capped; a truncated procedure points to its page"""
     moved_spec, advice = [], []
     for t, p in spec:
-        if SPEC_TOKEN.search(t):
+        if re.search(r"\b(will|may|can) (lead|cause|result|damage|affect|reduce)\b", t, re.I):
+            warn.append((t, p))                                   # a consequence, not a spec
+        elif re.match(r"(unwind|loosen|tighten|turn|pull|set|press|release|insert|remove|wait|push|rotate)\b", t, re.I) \
+                and not re.search(r"\b(km|months?|every|interval)\b", t, re.I):
+            steps.append((t, p))                                  # an action with a number, not a spec
+        elif SPEC_TOKEN.search(t):
             moved_spec.append((t, p))
         elif re.search(r"service cent|dealer", t, re.I):
             svc.append((t, p))
@@ -446,7 +462,7 @@ def tidy(spec, steps, warn, svc):
             keep.append(lst[i])
         return keep
 
-    spec, warn, svc = drop_subsets(spec), drop_subsets(warn), drop_subsets(svc)
+    spec, warn, svc, steps = drop_subsets(spec), drop_subsets(warn), drop_subsets(svc), drop_subsets(steps)
     if len(steps) > CAPS["steps"]:
         last_page = steps[CAPS["steps"]][1]
         steps = steps[:CAPS["steps"]] + [("… remaining steps are in the manual", last_page)]

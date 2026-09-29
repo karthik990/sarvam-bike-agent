@@ -86,6 +86,8 @@ def offline(index, only=None):
         print(f"\n=== {name}")
         for i, (msg, queries, expected) in enumerate(turns):
             variants = [("planned", queries)] + ([("raw", [msg])] if i == 0 else [])
+            if agent.split_on_and(msg):
+                variants.append(("split", agent.split_on_and(msg)))
             for label, qs in variants:
                 sections, _, _ = agent.retrieve(index, qs, None)
                 got = {l for s in sections for l in s["labels"]}
