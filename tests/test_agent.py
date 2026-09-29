@@ -199,3 +199,54 @@ def test_bad_json_is_repaired_not_raised():
     broken = '{"found": true, "summary": "Turn the "OFF" switch", "steps": [{"text": "Loosen nuts", "page": "82"}, {"text": "Tigh'
     d = parse_json_loose(broken)
     assert d["found"] is True and d["steps"][0]["page"] == "82"
+
+
+# ---------- regressions from the live eval run ----------
+def _mock_reply(content, finish="stop"):
+    class R:
+        status_code = 200; text = ""
+        def json(s): return {"choices": [{"finish_reason": finish, "message": {"content": content}}],
+                             "usage": {"prompt_tokens": 10, "completion_tokens": 10}}
+    return R()
+
+def test_truncated_single_part_reply_is_not_deleted():
+    """Root cause of the live refusals: cut-off replies had their only 'part' popped."""
+    import sarvam_client as sc
+    from unittest import mock
+    cut = ('{"parts":[{"question":"clutch","found":true,"summary":"Set 10-12 mm.","spec":[{"text":"10-12 mm","page":"81"}],'
+           '"steps":[{"text":"Loosen the cover end adjuster nuts","page":"82"},{"text":"Tighten the adj')
+    with mock.patch("requests.post", lambda *a, **k: _mock_reply(cut, "length")):
+        d = sc.Sarvam("k").chat_structured([{"role": "user", "content": "q"}], {}, "n")
+    assert len(d["parts"]) == 1 and [x["text"] for x in d["parts"][0]["steps"]] == ["Loosen the cover end adjuster nuts"]
+
+def test_normalise_variants():
+    assert agent._normalise({"answers": [{"summary": "x", "steps": [{"text": "a", "page": "1"}], "found": "false"}]})["parts"][0]["found"]
+    assert not agent._normalise({"parts": [{"found": False, "summary": "", "steps": []}]})["parts"][0]["found"]
+    assert agent._normalise({"summary": "s", "steps": [{"text": "a", "page": "1"}]})["parts"][0]["found"]
+
+def test_double_encoded_and_list_json():
+    import sarvam_client as sc, json
+    from unittest import mock
+    inner = json.dumps({"parts": [{"question": "q", "found": True, "summary": "s", "steps": [{"text": "a", "page": "1"}]}]})
+    for content in (json.dumps(inner), json.dumps([{"question": "q", "found": True, "summary": "s"}])):
+        with mock.patch("requests.post", lambda *a, **k: _mock_reply(content)):
+            d = sc.Sarvam("k").chat_structured([{"role": "user", "content": "q"}], {}, "n")
+        assert d["parts"] and d["parts"][0]["question"] == "q"
+
+def test_refusal_with_strong_match_shows_manual_text():
+    f = FakeSarvam(ans="NOT_IN_MANUAL")
+    agent.CONFIDENT_SCORE, old = 1.0, agent.CONFIDENT_SCORE
+    try:
+        r = agent.answer(f, idx(), "white smoke from the exhaust", [])
+    finally:
+        agent.CONFIDENT_SCORE = old
+    assert r.found and "Here is what the manual says" in r.answer and "p.1" in r.answer and "showing the manual" in r.reason
+
+def test_uncited_summary_with_wrong_numbers_is_dropped():
+    srcs = [("71", "Tyre pressure Front Rear Solo 32 psi 32 psi With Pillion 32 psi 36 psi")]
+    md, _, _ = agent.render({"parts": [{"question": "tyre", "found": True, "summary": "Tyre pressure is 40 psi"}]},
+                            "en-IN", {"71"}, srcs)
+    assert "40 psi" not in md
+    md, _, _ = agent.render({"parts": [{"question": "tyre", "found": True, "summary": "Tyre pressure solo is 32 psi"}]},
+                            "en-IN", {"71"}, srcs)
+    assert "32 psi" in md

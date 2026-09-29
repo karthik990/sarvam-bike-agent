@@ -30,31 +30,34 @@ SECTIONS_PER_PART = 2    # sections per question when there are several
 MAX_SECTIONS = 5         # hard cap on sections in one prompt
 SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
-PROMPT_VERSION = "p7"    # bump whenever prompts/format change -> old cached answers are ignored
+CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))  # strong match -> never show a bare refusal
+PROMPT_VERSION = "p8"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
-PLAN_SYS = """You prepare search queries for a motorcycle owner's manual.
+PLAN_SYS = """You prepare search queries for ONE specific motorcycle owner's manual.
 Given the recent conversation and the owner's LATEST message, return JSON:
-{"standalone": "<the latest message rewritten as a complete, self-contained English question; resolve 'it', 'that', 'the other one' etc. from the conversation>",
- "queries": ["<one short English search query per DISTINCT question in the latest message, using manual wording, e.g. 'tyre pressure', 'engine oil grade', 'clutch free play adjustment'>"],
+{"standalone": "<the latest message rewritten as a complete, self-contained question in English; resolve 'it', 'that', 'too', 'the other one' from the conversation>",
+ "queries": ["<short search query in owner's-manual wording>"],
  "language": "<BCP-47 code of the language the latest message is written in, e.g. en-IN, hi-IN, kn-IN>"}
-Rules: at most 3 queries. If the latest message starts a new topic, do NOT carry over the old topic.
-Include the subject (e.g. 'engine oil') in every query; never output a query like 'how often' alone."""
+Rules:
+- Usually ONE query. Use 2-3 only if the latest message asks clearly different things (e.g. tyre pressure AND engine oil).
+- Keep the owner's symptom and context: after "my bike won't start", "the lights are dim too" -> "engine does not start lights dim weak horn".
+- Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance'.
+- Do NOT add words like 'motorcycle', 'symptoms', 'troubleshooting', and do NOT guess causes or parts (no 'alternator', 'voltage').
+- If the latest message starts a new topic, do NOT carry over the old topic."""
 
 ANSWER_SYS = """You are a service advisor answering a motorcycle owner using ONLY the manual SECTIONS provided.
-Return JSON with one entry in "parts" for EACH question listed under QUESTIONS, in the same order.
-For each part:
-- found=false (and lists empty) if no section answers that question.
+Return JSON: {"parts": [one object per question under QUESTIONS, same order], "not_covered": "..."}.
+Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "warnings"} where the lists hold {"text", "page"} items.
+- found=true whenever ANY section contains information relevant to that question; give what the manual says, even if partial. found=false only if no section is about it.
 - summary: one plain sentence that directly answers that question.
-- spec: key numbers/limits stated in the manual (e.g. free play 10-12 mm).
-- steps: the manual's check/procedure steps IN THE MANUAL'S ORDER, one short imperative action each. Do not merge, reorder or invent steps.
-- service_centre: when the manual says to visit/contact a service centre.
-- warnings: only CAUTION/WARNING text about THIS question's task.
-- page = the number from the nearest [p.N] marker ABOVE the text you used, digits only (e.g. "82").
-Keep it tight: per part at most 4 spec, 8 steps, 3 warnings, 2 service_centre items; each text under 20 words.
-Inside text never use double quotes. Never use knowledge outside the SECTIONS.
-not_covered: one short sentence on anything asked that the sections don't cover, else "".
+- spec: key numbers/limits (e.g. free play 10-12 mm). steps: the manual's check/procedure steps IN THE MANUAL'S ORDER, one short action each; never merge, reorder or invent.
+- service_centre: when the manual says to visit a service centre. warnings: only CAUTION/WARNING about this question's task.
+- page = digits of the nearest [p.N] marker ABOVE the text you used (e.g. "82").
+- Per part at most 4 spec, 6 steps, 2 warnings, 2 service_centre; each text under 18 words. No double quotes inside text.
+- Never use knowledge outside the SECTIONS. not_covered: one short sentence on anything asked but not in the sections, else "".
+Example: {"parts":[{"question":"tyre pressure","found":true,"summary":"Front 32 psi; rear 32 psi solo, 36 psi with pillion.","spec":[{"text":"Front 32 psi, rear 32 psi (solo)","page":"71"},{"text":"Rear 36 psi with pillion","page":"71"}],"steps":[],"service_centre":[],"warnings":[]}],"not_covered":""}
 Write all text in {lang}."""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},
@@ -124,12 +127,13 @@ class Result:
     queries: list[str] = field(default_factory=list)
     followup: bool = False
     section_ids: list[int] = field(default_factory=list)
+    debug: str = ""                      # raw model output snippet when something went wrong
 
 
 # ---------------------------------------------------------------- conversation helpers
 FOLLOWUP_RE = re.compile(
     r"^(and|also|so|then|ok|okay|but|what about|how about|same|next)\b|"
-    r"\b(it|its|that|this|those|these|them|they|there|same|other one|previous|above|step \d+|again)\b")
+    r"\b(it|its|that|this|those|these|them|they|there|same|other one|previous|above|step \d+|again|too|as well|also)\b")
 MULTI_RE = re.compile(r"\?.*\S.*\?|\band (what|how|which|when|why|where|is|are|can|should|do|does)\b|;|\balso\b", re.I)
 
 
@@ -282,13 +286,14 @@ def _schedule_hit(index: Index, query: str):
     return ranked[0] if ranked else None
 
 
-def retrieve(index: Index, queries: list[str], img_desc: str | None):
-    """Per-question retrieval so one question can't crowd out another. Returns (sections, hits, per_query)."""
+def retrieve(index: Index, queries: list[str], img_desc: str | None, context: str = ""):
+    """Per-question retrieval so one question can't crowd out another. Returns (sections, hits, per_query).
+    `context` (previous question, only for real follow-ups) is added as a WEAK expansion hint."""
     per_query, all_hits, used, sections = [], [], set(), []
     budget = SECTIONS_SINGLE if len(queries) == 1 else SECTIONS_PER_PART
     for i, q in enumerate(queries):
         qq = q + (f" {img_desc}" if img_desc and i == 0 else "")
-        exp = expansion_terms(qq)
+        exp = (expansion_terms(qq) + " " + context).strip()
         hits = [h for h in index.search(qq, k=TOP_K, expansion=exp) if h[1] >= MIN_SCORE]
         if INTERVAL_RE.search(q):
             sh = _schedule_hit(index, q)
@@ -330,12 +335,28 @@ def resolve_page(raw, text: str, allowed: set[str], sources, pdf2label: dict) ->
     return _overlap_label(text, sources)  # no usable page: keep only if the wording matches a chunk
 
 
+def _part_found(pt: dict) -> bool:
+    """found unless the model explicitly said false AND gave nothing; tolerate 'true'/'false' strings."""
+    f = pt.get("found")
+    if isinstance(f, str):
+        f = f.strip().lower() not in ("false", "no", "0", "")
+    has_content = any(pt.get(k) for k in ("spec", "steps", "service_centre", "warnings"))
+    return bool(has_content) or (f is not False and bool(str(pt.get("summary", "")).strip())
+                                 and NOT_FOUND not in str(pt.get("summary", "")))
+
+
 def _normalise(data: dict) -> dict:
-    """Accept both the multi-part schema and the older single-answer shape."""
-    if isinstance(data.get("parts"), list):
-        return data
+    """Accept the multi-part schema, common variants ('answers', 'results') and the single-answer shape."""
+    for key in ("parts", "answers", "results", "items"):
+        if isinstance(data.get(key), list):
+            parts = [p for p in data[key] if isinstance(p, dict)]
+            for p in parts:
+                p["found"] = _part_found(p)
+            return {"parts": parts, "not_covered": data.get("not_covered", "")}
     if any(k in data for k in ("summary", "steps", "spec")):
-        return {"parts": [dict(data, question=data.get("question", ""))], "not_covered": data.get("not_covered", "")}
+        p = dict(data, question=data.get("question", ""))
+        p["found"] = _part_found(p)
+        return {"parts": [p], "not_covered": data.get("not_covered", "")}
     return {"parts": [], "not_covered": data.get("not_covered", "")}
 
 
@@ -374,7 +395,15 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
         md = []
         if len(parts) > 1:
             md.append(f"#### {n}. {str(part.get('question', '')).strip() or 'Question ' + str(n)}")
-        found = part.get("found", True) and (spec or steps or svc or warn or part.get("summary"))
+        summ = str(part.get("summary", "")).strip()
+        if summ and not (spec or steps or svc or warn):
+            # uncited summary: keep only if its wording and numbers are in the retrieved manual text
+            src_text = " ".join(t for _, t in sources).lower()
+            nums_ok = all(n in src_text for n in re.findall(r"\d+(?:\.\d+)?", summ))
+            if not (nums_ok and _overlap_label(summ, sources)):
+                part = dict(part, summary="")
+                summ = ""
+        found = part.get("found", True) and (spec or steps or svc or warn or summ)
         if not found or NOT_FOUND in str(part.get("summary", "")):
             md.append(f"*{h[4]}.*")
             blocks.append("\n".join(md))
@@ -401,6 +430,20 @@ def extractive_answer(sections) -> str:
     return "**Relevant sections from your manual** (offline mode, no AI summary):\n\n" + "\n\n".join(
         f"**p.{', '.join(s['labels'])}**\n\n" + "\n".join(f"> {l}" for l in s["text"].splitlines())
         for s in sections)
+
+
+def grounded_fallback(sections, per_query, lang: str) -> str | None:
+    """Model refused/failed but retrieval is strong: show the manual's own words instead of a bare
+    refusal (still 100% from the manual, with pages)."""
+    best = max([sc for _, _, hs in per_query for _, sc in hs], default=0)
+    if best < CONFIDENT_SCORE or not sections:
+        return None
+    note = {"hi": "मैनुअल में यह लिखा है:"}.get(lang.split("-")[0], "Here is what the manual says:")
+    blocks = []
+    for s in sections[:2]:
+        body = "\n".join(f"> {l}" for l in s["text"].splitlines() if not l.startswith("[p."))
+        blocks.append(f"**p.{', '.join(s['labels'])}**\n\n{body}")
+    return f"**{note}**\n\n" + "\n\n".join(blocks)
 
 
 # ---------------------------------------------------------------- main entry
@@ -444,7 +487,21 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     followup = is_followup(question, history) or (has_history(history) and standalone.lower() != q_en.lower())
 
     # 3) retrieve per question
-    sections, hits, per_query = retrieve(index, queries, img_desc)
+    prev = next((m for m in reversed(history) if m["role"] == "user"), {})
+    ctx_hint = (prev.get("standalone") or prev.get("content", ""))[:200] if is_followup(question, history) else ""
+    sections, hits, per_query = retrieve(index, queries, img_desc, ctx_hint)
+    if ctx_hint:
+        sections = sections[:MAX_SECTIONS - 1]           # reserve one slot for the context section
+        # safety net for follow-ups: one section for "this message + previous question", in case the
+        # planner's queries lost the context (e.g. 'the lights are dim too' after 'won't start')
+        have = {x.id for s in sections for x in s["chunks"]}
+        extra, xhits, xpq = retrieve(index, [f"{q_en} {ctx_hint}"], None)
+        for sec in extra:
+            if not have & {x.id for x in sec["chunks"]}:
+                sec["query"] = standalone
+                sections.append(sec); hits += xhits[:1]
+                per_query += xpq
+                break
     shown_q = " | ".join(q + (f" [+ {e}]" if e else "") for q, e, _ in per_query)
     common = dict(standalone=standalone, queries=queries, followup=followup)
     if not sections:
@@ -470,17 +527,25 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     data = client.chat_structured([
         {"role": "system", "content": ANSWER_SYS.replace("{lang}", LANG_NAMES.get(lang, "English"))},
         {"role": "user", "content": user},
-    ], SCHEMA, "manual_answer", max_tokens=700 + 350 * (len(queries) - 1))
+    ], SCHEMA, "manual_answer", max_tokens=1100 + 500 * (len(queries) - 1))
     calls += 1
 
+    raw_snip = str(getattr(client, "last_raw", "") or "")[:600]
+    fin = getattr(client, "last_finish", None)
+
+    def fail(reason):
+        fb = grounded_fallback(sections, per_query, lang)
+        if fb:
+            return Result(fb, True, hits, img_desc, shown_q, lang, warnings, calls, section_ids=section_ids,
+                          reason=f"{reason}; showing the manual text instead", debug=raw_snip, **common)
+        return Result(_refusal(lang), False, hits, img_desc, shown_q, lang, warnings, calls,
+                      reason=reason, debug=raw_snip, **common)
+
     if not data:
-        fin = getattr(client, "last_finish", None)
-        return Result(_refusal(lang), False, hits, img_desc, shown_q, lang, warnings, calls,
-                      reason=f"model returned no usable JSON (finish_reason={fin})", **common)
+        return fail(f"model returned no usable JSON (finish_reason={fin})")
     data = _normalise(data)
-    if not any(pt.get("found") for pt in data["parts"] if isinstance(pt, dict)):
-        return Result(_refusal(lang), False, hits, img_desc, shown_q, lang, warnings, calls,
-                      reason="model found the retrieved sections unrelated — see passages below", **common)
+    if not any(pt.get("found") for pt in data["parts"]):
+        return fail(f"model marked every question not found (finish_reason={fin})")
 
     # 5) local render + citation check
     allowed = {l for s in sections for l in s["labels"]}
@@ -491,9 +556,7 @@ def answer(client, index: Index, question: str, history: list[dict], *,
         warnings.append(f"Removed {dropped} item(s) that couldn't be tied to a retrieved page "
                         f"(model cited: {', '.join(sorted(set(render.dropped_raw)))[:80]}).")
     if kept == 0:
-        return Result(_refusal(lang), False, hits, img_desc, shown_q, lang, warnings, calls,
-                      reason="no answer item could be tied to a retrieved page, so it was withheld", **common)
-    summary = " | ".join(str(pt.get("summary", "")).strip() for pt in data["parts"]
-                         if isinstance(pt, dict) and pt.get("found"))[:300]
+        return fail("no answer item could be tied to a retrieved page")
+    summary = " | ".join(str(pt.get("summary", "")).strip() for pt in data["parts"] if pt.get("found"))[:300]
     return Result(text, True, hits, img_desc, shown_q, lang, warnings, calls,
                   summary=summary, section_ids=section_ids, **common)

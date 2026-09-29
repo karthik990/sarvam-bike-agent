@@ -33,6 +33,19 @@ class SarvamError(RuntimeError):
     pass
 
 
+def _drop_half_items(obj):
+    """Recursively drop the last element of lists of cited items ({text, page}) when it lacks a page.
+    Never touches container lists like 'parts' (their elements have no 'text' key)."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _drop_half_items(v)
+    elif isinstance(obj, list):
+        if obj and isinstance(obj[-1], dict) and "text" in obj[-1] and not obj[-1].get("page"):
+            obj.pop()
+        for v in obj:
+            _drop_half_items(v)
+
+
 def parse_json_loose(raw: str):
     """Strict json first; then json-repair (handles unescaped quotes, missing commas, truncation)."""
     import json
@@ -153,10 +166,12 @@ class Sarvam:
             raw = self.chat(messages, max_tokens=max_tokens, response_format={"type": "json_object"})
         self.last_raw = raw
         data = parse_json_loose(raw)
+        if isinstance(data, str):                 # double-encoded JSON string
+            data = parse_json_loose(data)
+        if isinstance(data, list):                # bare list of parts
+            data = {"parts": data}
         if self.last_finish == "length" and isinstance(data, dict):
-            for k, v in data.items():          # cut-off reply: last item may be half-written
-                if isinstance(v, list) and v and isinstance(v[-1], dict) and not v[-1].get("page"):
-                    v.pop()
+            _drop_half_items(data)                # cut-off reply: only drop half-written CITED items
         return data if isinstance(data, dict) else {}
 
     def chat_json(self, messages, max_tokens: int = 160) -> dict:

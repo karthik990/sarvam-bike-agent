@@ -166,7 +166,7 @@ if question:
                 st.caption("💬 Follow-up: used context from the previous question")
             if res.standalone and res.standalone.strip().lower() != question.strip().lower():
                 st.caption(f"🧭 Understood as: *{res.standalone}*")
-            r = {"summary": res.summary, "standalone": res.standalone,
+            r = {"reason": res.reason, "debug": res.debug, "summary": res.summary, "standalone": res.standalone,
                  "cost": total, "img_cost": img_cost, "answer": res.answer, "lang": res.language, "img": res.image_description, "query": res.query,
                  "sources": [{"page": c.label, "heading": c.heading, "text": c.text[:600], "score": s}
                              for c, s in res.sources]}
@@ -180,6 +180,11 @@ if question:
             if r["img"]:
                 st.markdown(f"**Photo (description only):** {r['img']}")
             st.markdown(f"**Local search query:** `{r['query'][:300]}`")
+            if r.get("reason"):
+                st.markdown(f"**Note:** {r['reason']}")
+            if r.get("debug"):
+                st.markdown("**Raw model output (debug):**")
+                st.code(r["debug"][:600])
             for s in r["sources"]:
                 st.markdown(f"**p.{s['page']}** {('— ' + s['heading']) if s['heading'] else ''} · score {s['score']:.2f}")
                 st.text(s["text"])

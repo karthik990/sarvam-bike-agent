@@ -45,44 +45,63 @@ CONVERSATIONS = {
 }
 
 
-def offline(index):
+def offline(index, only=None):
+    """Checks retrieval twice: with the ideal planner queries, and with the RAW message
+    (what a first question uses, since the planner is skipped when there's no history)."""
     total = ok = 0
     for name, turns in CONVERSATIONS.items():
+        if only and only not in name:
+            continue
         print(f"\n=== {name}")
-        for msg, queries, expected in turns:
-            sections, _, _ = agent.retrieve(index, queries, None)
-            got = {l for s in sections for l in s["labels"]}
-            hit = bool(expected & got)
-            total += 1; ok += hit
-            print(f"  {'PASS' if hit else 'FAIL'}  {msg[:55]:55} want {sorted(expected)} got {sorted(got, key=lambda x: int(x) if x.isdigit() else 0)}")
-    print(f"\nRetrieval: {ok}/{total} questions reached the right page(s)")
+        for i, (msg, queries, expected) in enumerate(turns):
+            variants = [("planned", queries)] + ([("raw", [msg])] if i == 0 else [])
+            for label, qs in variants:
+                sections, _, _ = agent.retrieve(index, qs, None)
+                got = {l for s in sections for l in s["labels"]}
+                hit = bool(expected & got)
+                total += 1; ok += hit
+                print(f"  {'PASS' if hit else 'FAIL'}  [{label:7}] {msg[:48]:48} want {sorted(expected)} "
+                      f"got {sorted(got, key=lambda x: int(x) if x.isdigit() else 0)}")
+    print(f"\nRetrieval: {ok}/{total} checks reached the right page(s)")
     return ok == total
 
 
-def live(index):
+def live(index, only=None):
     from sarvam_client import Sarvam
     load_dotenv()
     client = Sarvam(os.environ["SARVAM_API_KEY"])
+    passed = total = 0
     for name, turns in CONVERSATIONS.items():
+        if only and only not in name:
+            continue
         print(f"\n=== {name}")
         history = []
         for msg, _, expected in turns:
             r = agent.answer(client, index, msg, history)
-            cited = set(re.findall(r"\(p\.(\d+)\)", r.answer))
+            cited = set(re.findall(r"\(p\.(\d+)\)", r.answer)) | set(re.findall(r"\*\*p\.([\d, ]+)\*\*", r.answer))
+            cited = {c.strip() for x in cited for c in x.split(",")}
+            good = bool(cited & expected)
+            total += 1; passed += good
             print(f"\n> {msg}\n  understood as: {r.standalone}\n  queries: {r.queries}\n"
                   f"  cited {sorted(cited)} (expected any of {sorted(expected)}) "
-                  f"{'OK' if cited & expected else 'CHECK'}  calls={r.api_calls}")
+                  f"{'OK' if good else 'CHECK'}  calls={r.api_calls}")
+            if r.reason:
+                print(f"  reason: {r.reason}")
+            if r.debug and (not good or r.reason):
+                print(f"  raw model output: {r.debug[:400]!r}")
             print("  " + r.answer.replace("\n", "\n  ")[:900])
             for w in r.warnings:
                 print("  ! " + w)
             history += [{"role": "user", "content": msg, "standalone": r.standalone, "img_desc": r.image_description},
                         {"role": "assistant", "content": r.answer, "summary": r.summary}]
-    print(f"\nTotal spend: ₹{client.spent:.3f} over {len(client.ledger)} calls")
+    print(f"\nLive: {passed}/{total} answers cited an expected page. "
+          f"Total spend: ₹{client.spent:.3f} over {len(client.ledger)} calls")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        sys.exit("usage: python eval.py <manual.pdf> [--live]")
+        sys.exit("usage: python eval.py <manual.pdf> [--live] [--only <conversation name part>]")
+    only = sys.argv[sys.argv.index("--only") + 1] if "--only" in sys.argv else None
     chunks, _ = load_pdf(open(sys.argv[1], "rb").read())
     idx = Index(chunks)
-    live(idx) if "--live" in sys.argv else sys.exit(0 if offline(idx) else 1)
+    live(idx, only) if "--live" in sys.argv else sys.exit(0 if offline(idx, only) else 1)
