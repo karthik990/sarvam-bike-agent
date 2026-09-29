@@ -250,3 +250,26 @@ def test_uncited_summary_with_wrong_numbers_is_dropped():
     md, _, _ = agent.render({"parts": [{"question": "tyre", "found": True, "summary": "Tyre pressure solo is 32 psi"}]},
                             "en-IN", {"71"}, srcs)
     assert "32 psi" in md
+
+
+# ---------- maintenance chart + duplicates ----------
+def test_maintenance_chart_rows_rebuilt_from_columns():
+    from rag import normalize_maintenance
+    lines = ["PERIODICAL MAINTENANCE", "km (x 1,000)", "0.5", "5", "10", "Months", "1.5", "6", "12",
+             "1", "Engine oil (Level check/replace)", "R", "I", "R", "Check level at every 1,000 km",
+             "2", "Engine oil filter element", "R", "R"]
+    st = {"grid": {2: ["R", "", "R"]}}
+    out = normalize_maintenance(lines, st)
+    row1 = next(l for l in out if l.startswith("Maintenance item 1."))
+    assert "Replace at 0.5, 10 thousand km (1.5, 12 months)" in row1 and "Inspect at 5 thousand km" in row1
+    assert "Check level at every 1,000 km" in row1                   # note kept, not merged into interval
+    row2 = next(l for l in out if l.startswith("Maintenance item 2."))
+    assert "Replace at 0.5, 10 thousand km" in row2                   # blank cell honoured via grid
+
+def test_duplicate_lines_removed():
+    md, kept, _ = agent.render({"parts": [{"question": "tyre", "found": True, "summary": "s",
+        "spec": [{"text": "Rear 36 psi with pillion", "page": "71"}, {"text": "Rear 36 psi with pillion", "page": "104"}],
+        "steps": [{"text": "Contact Authorised service center", "page": "108"}],
+        "service_centre": [{"text": "Contact authorised service center.", "page": "109"}], "warnings": []}]},
+        "en-IN", {"71", "104", "108", "109"})
+    assert md.count("36 psi") == 1 and md.lower().count("contact authorised service center") == 1

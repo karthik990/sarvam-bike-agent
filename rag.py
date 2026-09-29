@@ -114,6 +114,104 @@ def _is_heading(line: str) -> bool:
             and not s.endswith(".") and s.rstrip("/: ") not in INLINE_LABELS)
 
 
+CODE_NAMES = {"R": "Replace", "I": "Inspect", "C": "Clean", "A": "Adjust", "L": "Lubricate"}
+CODE_RE = re.compile(r"^(?:[RICAL])(?:\s*&\s*[RICAL])?$")
+
+
+def _fmt_code(c: str) -> str:
+    return " & ".join(CODE_NAMES.get(x.strip(), x.strip()) for x in c.split("&"))
+
+
+def maintenance_grid(page) -> dict[int, list[str]]:
+    """Exact cell grid of a periodic-maintenance chart (blank cells kept) via PyMuPDF find_tables.
+    Returns {row_number: [code per service column]}; {} if the page has no such table."""
+    import contextlib, io
+    grid = {}
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            tables = page.find_tables().tables
+    except Exception:
+        return grid
+    for t in tables:
+        rows = t.extract()
+        if not any((r[1] or "").lower().startswith("km (x") for r in rows if len(r) > 2):
+            continue
+        for r in rows:
+            if r and (r[0] or "").strip().isdigit() and len(r) > 2:
+                cells = [(c or "").strip().replace(" ", "").replace("l", "I") for c in r[2:]]
+                if all(c == "" or CODE_RE.match(c) for c in cells):
+                    grid[int(r[0])] = cells
+    return grid
+
+
+def normalize_maintenance(lines: list[str], state: dict) -> list[str]:
+    """Periodic-maintenance charts lose their column alignment when a PDF is flattened
+    ('Engine oil R I R I R ...'). Rebuild each row as a plain sentence using the chart's km/month
+    header, e.g. 'Engine oil: Replace at 0.5, 10, 20 ... thousand km (1.5, 12, 24 ... months);
+    Inspect at 5, 15, ...'. Rows whose cells can't be aligned are flagged instead of guessed."""
+    text = " ".join(lines).lower()
+    if "km (x 1,000)" in text or "km (x1,000)" in text:
+        i = next(k for k, l in enumerate(lines) if l.lower().startswith("km (x"))
+        km, months, j = [], [], i + 1
+        while j < len(lines) and re.fullmatch(r"\d+(\.\d+)?", lines[j]):
+            km.append(lines[j]); j += 1
+        if j < len(lines) and lines[j].lower().startswith("month"):
+            j += 1
+            while j < len(lines) and len(months) < len(km) and re.fullmatch(r"\d+(\.\d+)?", lines[j]):
+                months.append(lines[j]); j += 1
+        if km and len(months) == len(km):
+            state.update(km=km, months=months)
+            head = lines[:i] + [f"Service columns: {', '.join(km)} thousand km / {', '.join(months)} months (whichever is earlier)."]
+            lines = head + lines[j:]
+        else:
+            return lines
+    if not state.get("km"):
+        return lines
+    km, months = state["km"], state["months"]
+    lines = ["I" if l == "l" else l for l in lines]      # PDF renders one 'I' cell as lowercase 'l'
+    out, k, expected = [], 0, None
+    while k < len(lines):
+        l = lines[k]
+        is_row = re.fullmatch(r"\d{1,2}", l) and (expected is None or int(l) == expected)
+        if not is_row:
+            out.append(l); k += 1; continue
+        num = int(l); expected = num + 1; k += 1
+        name, codes, notes = [], [], []
+        while k < len(lines) and not CODE_RE.match(lines[k]) and not re.fullmatch(r"\d{1,2}", lines[k]):
+            name.append(lines[k]); k += 1
+        while k < len(lines) and CODE_RE.match(lines[k]):
+            codes.append(lines[k].replace(" ", "")); k += 1
+        while k < len(lines) and not (re.fullmatch(r"\d{1,2}", lines[k]) and int(lines[k]) == expected):
+            notes.append(lines[k]); k += 1
+        nm = " ".join(name).strip()
+        g = state.get("grid", {}).get(num)
+        if g and len(g) == len(km) and [c for c in g if c] == codes:
+            # exact grid from the table reader: skip blank cells, keep true column positions
+            pairs = [(c, a, b) for c, a, b in zip(g, km, months) if c]
+            groups = {}
+            for c, a, b in pairs:
+                groups.setdefault(c, ([], []))
+                groups[c][0].append(a); groups[c][1].append(b)
+            parts = [f"{_fmt_code(c)} at {', '.join(a)} thousand km ({', '.join(b)} months)" for c, (a, b) in groups.items()]
+            row = f"Maintenance item {num}. {nm}: " + "; ".join(parts) + "."
+        elif len(codes) == len(km):
+            groups = {}
+            for c, a, b in zip(codes, km, months):
+                groups.setdefault(c, ([], []))
+                groups[c][0].append(a); groups[c][1].append(b)
+            parts = [f"{_fmt_code(c)} at {', '.join(a)} thousand km ({', '.join(b)} months)" for c, (a, b) in groups.items()]
+            row = f"Maintenance item {num}. {nm}: " + "; ".join(parts) + "."
+        elif codes:
+            row = (f"Maintenance item {num}. {nm}: chart marks {', '.join(_fmt_code(c) for c in codes)} in "
+                   f"{len(codes)} of the {len(km)} service columns (exact km per the printed chart).")
+        else:
+            row = f"Maintenance item {num}. {nm}"
+        if notes:
+            row += " " + " ".join(notes)
+        out.append(row)
+    return out
+
+
 def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
     """Section-aware chunking: split on the manual's own ALL-CAPS headings so an excerpt never mixes
     two topics (e.g. a rear-wheel caution leaking into the clutch answer). Running headers/footers
@@ -132,6 +230,7 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
     chunks: list[Chunk] = []
     empty = 0
     heading = ""
+    mstate: dict = {}
 
     def flush(pno, label, body):
         text = "\n".join(body).strip()
@@ -154,6 +253,9 @@ def load_pdf(data: bytes, max_chars: int = 900) -> tuple[list[Chunk], dict]:
                 label = l
                 break
         lines = [l for l in lines if l not in running and l != label]
+        if "km (x" in " ".join(lines).lower() or mstate.get("km"):
+            mstate["grid"] = maintenance_grid(doc[pno - 1])
+        lines = normalize_maintenance(lines, mstate)
         if sum(len(l) for l in lines) < 40:
             empty += 1
             continue

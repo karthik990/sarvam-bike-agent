@@ -52,7 +52,7 @@ The agent handles follow-ups ("is it the same with a pillion?", "how often shoul
 3. **The answer comes in parts,** one per question, each with its own page citations.
 4. **Memory holds standalone questions and one-line summaries**, never whole answers and never an ever-growing topic string. This fixed the earlier drift, where turn 5 was still searching for tyre pressure.
 
-**Evaluation:** `python eval.py manual.pdf` checks 13 questions over 4 conversations (follow-ups, topic switches, multi-question messages, a troubleshooting chain) against the manual pages that hold the answers. Current result: **13/13**. `python eval.py manual.pdf --live` runs the same conversations on Sarvam and prints each answer, how it was understood, what it cited, and the cost (about ₹1 in total).
+**Evaluation:** `python eval.py manual.pdf` checks 13 questions over 4 conversations (follow-ups, topic switches, multi-question messages, a troubleshooting chain) against the manual pages that hold the answers. Current result: **17/17** offline checks and **13/13** live answers citing the right page (₹0.87 for the full live run). `python eval.py manual.pdf --live` runs the same conversations on Sarvam and prints each answer, how it was understood, what it cited, and the cost (about ₹1 in total).
 
 ## Approach
 
@@ -75,6 +75,7 @@ Key design choices:
 0. **Answer quality comes from structure, not fine-tuning.** Three things make answers consistent:
    - *Chunks follow the manual's own sections.* The text is split on the manual's ALL-CAPS headings and the repeated page headers are stripped, so one topic's caution can't leak into another's answer. Each hit is expanded to its whole section, so procedures arrive complete and in order.
    - *The model returns structured JSON* (summary, spec, steps, warnings, service centre, not covered), constrained by a JSON schema. The app renders it in the same layout every time and drops empty sections.
+   - *Tables are rebuilt before indexing.* When a PDF is flattened, the periodic-maintenance chart becomes 'Engine oil R I R I R …' and loses its columns; that made the model answer 'change oil every 1,000 km'. Each chart row is rebuilt from the exact cell grid (PyMuPDF `find_tables`, blank cells kept) into a sentence: 'Engine oil: Replace at 0.5, 10, 20 … thousand km (1.5, 12, 24 … months); Inspect at 5, 15 … ; check level every 1,000 km'.
    - *Every item carries its own page number, and citations use the page numbers printed in the manual*, i.e. what the owner sees on the page. Any item citing a page that wasn't retrieved is dropped.
 
 1. **The vision model describes but never diagnoses.** It only reports what it can see (e.g. "thick white smoke from the exhaust pipe"). That description becomes part of the search query. The diagnosis always comes from the manual, which keeps a capable VLM from bringing in its own general mechanical knowledge.

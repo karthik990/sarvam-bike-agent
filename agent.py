@@ -31,7 +31,7 @@ MAX_SECTIONS = 5         # hard cap on sections in one prompt
 SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
 CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))  # strong match -> never show a bare refusal
-PROMPT_VERSION = "p8"    # bump whenever prompts/format change -> old cached answers are ignored
+PROMPT_VERSION = "p9"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
@@ -52,7 +52,8 @@ Return JSON: {"parts": [one object per question under QUESTIONS, same order], "n
 Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "warnings"} where the lists hold {"text", "page"} items.
 - found=true whenever ANY section contains information relevant to that question; give what the manual says, even if partial. found=false only if no section is about it.
 - summary: one plain sentence that directly answers that question.
-- spec: key numbers/limits (e.g. free play 10-12 mm). steps: the manual's check/procedure steps IN THE MANUAL'S ORDER, one short action each; never merge, reorder or invent.
+- spec: ONLY numbers, limits, grades or intervals (e.g. free play 10-12 mm; replace at 10 thousand km). Actions go in steps.
+- For 'how often' questions, quote the 'Maintenance item' line's schedule exactly as written (e.g. Replace at 0.5, 10, 20 thousand km); never turn a 'check level' note into a replacement interval. steps: the manual's check/procedure steps IN THE MANUAL'S ORDER, one short action each; never merge, reorder or invent.
 - service_centre: when the manual says to visit a service centre. warnings: only CAUTION/WARNING about this question's task.
 - page = digits of the nearest [p.N] marker ABOVE the text you used (e.g. "82").
 - Per part at most 4 spec, 6 steps, 2 warnings, 2 service_centre; each text under 18 words. No double quotes inside text.
@@ -389,9 +390,24 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
 
     parts = data["parts"][:MAX_PARTS]
     blocks = []
+
+    def dedupe(lists):
+        """Drop repeated lines within one answer (same wording from two pages, or the same line in
+        two sections), keeping the first occurrence."""
+        seen, out = set(), []
+        for lst in lists:
+            keep = []
+            for t, p in lst:
+                key = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+                if key in seen:
+                    continue
+                seen.add(key); keep.append((t, p))
+            out.append(keep)
+        return out
+
     for n, part in enumerate(parts, 1):
-        spec, steps = items(part, "spec"), items(part, "steps")
-        svc, warn = items(part, "service_centre"), items(part, "warnings")
+        spec, steps, warn, svc = dedupe([items(part, "spec"), items(part, "steps"),
+                                         items(part, "warnings"), items(part, "service_centre")])
         md = []
         if len(parts) > 1:
             md.append(f"#### {n}. {str(part.get('question', '')).strip() or 'Question ' + str(n)}")
