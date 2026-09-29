@@ -65,7 +65,9 @@ with st.sidebar:
                 chunks, stats = load_pdf(data)
             ss.update(pdf_hash=h, index=Index(chunks), stats=stats, manual_name=pdf.name, messages=[])
         s = ss.stats
-        st.success(f"{ss.manual_name}: {s['pages']} pages · {s['chunks']} chunks (indexed locally, 0 tokens)")
+        st.success(f"{ss.manual_name}: {s['pages']} pages · {s['chunks']} sections (indexed locally, 0 tokens)")
+        st.caption(f"Layout detected automatically: headings by {s.get('heading_style', 'caps').replace('+', ' / ')}"
+                   " · works with any bike's owner's or service manual")
         if s["image_only_pages"]:
             st.warning(f"{s['image_only_pages']} scanned page(s) without text can't be searched.")
     st.caption("💬 The agent remembers this conversation: ask follow-ups like 'and the chain?' or 'what's step 3?'")

@@ -44,7 +44,7 @@ Given the recent conversation and the owner's LATEST message, return JSON:
 Rules:
 - Usually ONE query. Use 2-3 when the latest message asks about different things or reports different symptoms joined by 'and' (e.g. 'tyre pressure' + 'engine oil grade'; 'ABS lamp continuously on' + 'engine does not start').
 - Keep the owner's symptom and context: after "my bike won't start", "the lights are dim too" -> "engine does not start lights dim weak horn".
-- Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance', 'fuel tank capacity' (not petrol), 'kerb weight' (not how heavy), 'running in period', 'MIL malfunction indicator lamp', 'Tripper navigation bluetooth'.
+- Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance', 'fuel tank capacity' (not petrol), 'kerb weight' (not how heavy), 'running in period', 'malfunction indicator lamp', 'navigation bluetooth app'.
 - Do NOT add words like 'motorcycle', 'symptoms', 'troubleshooting', and do NOT guess causes or parts (no 'alternator', 'voltage').
 - If the latest message starts a new topic, do NOT carry over the old topic."""
 
@@ -62,7 +62,7 @@ Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "
 - page = digits of the nearest [p.N] marker ABOVE the text you used (e.g. "82").
 - Per part at most 4 spec, 8 steps, 2 warnings, 2 service_centre; never repeat the same fact in two lists; each text under 18 words. No double quotes inside text.
 - Never use knowledge outside the SECTIONS. not_covered: one short sentence on anything asked but not in the sections, else "".
-Example: {"parts":[{"question":"tyre pressure","found":true,"summary":"Front 32 psi; rear 32 psi solo, 36 psi with pillion.","spec":[{"text":"Front 32 psi, rear 32 psi (solo)","page":"71"},{"text":"Rear 36 psi with pillion","page":"71"}],"steps":[],"service_centre":[],"warnings":[]}],"not_covered":""}
+Format example (placeholders, NOT real values; always take values from the SECTIONS): {"parts":[{"question":"<question>","found":true,"summary":"<one sentence with the manual's value>","spec":[{"text":"<item> <value with unit>","page":"<N>"}],"steps":[],"service_centre":[],"warnings":[]}],"not_covered":""}
 Write all text in {lang}."""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},
@@ -305,14 +305,29 @@ def build_sections(index: Index, hits, max_sections: int = SECTIONS_SINGLE, used
 INTERVAL_RE = re.compile(r"\b(how often|interval|when should|when to|every how|schedule|how many (km|kms|months)|due)\b", re.I)
 
 
+GENERIC_SCHED_WORDS = {"maintenanc", "interval", "servic", "schedul", "periodic", "periodical", "check", "chang",
+                       "replac", "inspect", "often", "km", "month", "need", "get", "it"}
+
+
 def _schedule_hit(index: Index, query: str):
-    """For 'how often / when' questions: best matching row of the periodical maintenance chart."""
-    subject = INTERVAL_RE.sub(" ", query)
-    sched = [i for i, t in enumerate(index._flat) if "periodical maintenance" in t or "maintenance schedule" in t]
-    if not sched:
+    """For 'how often / when' questions: the maintenance-schedule ROW about the item asked for.
+    Rows are scored individually (not whole sections) on the item's own words."""
+    from rag import SCHEDULE_RE, tokenize
+    subject = set(tokenize(INTERVAL_RE.sub(" ", query))) - GENERIC_SCHED_WORDS
+    if not subject:
         return None
-    ranked = [(c, sc) for c, sc in index.search(subject, k=len(index.chunks)) if c.id in set(sched)]
-    return ranked[0] if ranked else None
+    best, best_c = 0.0, None
+    for c in index.chunks:
+        rows = [l for l in c.text.splitlines() if l.startswith("Maintenance item")]
+        if not rows and not SCHEDULE_RE.search(c.heading):
+            continue
+        for row in rows or c.text.splitlines():
+            name = row.split(":")[0] if row.startswith("Maintenance item") and ":" in row else row
+            toks = set(tokenize(name))
+            score = len(subject & toks) / len(subject) + 0.1 * len(subject & set(tokenize(row)))
+            if score > best:
+                best, best_c = score, c
+    return (best_c, best * 10) if best_c is not None and best >= 0.5 else None
 
 
 def retrieve(index: Index, queries: list[str], img_desc: str | None, context: str = ""):
@@ -326,7 +341,8 @@ def retrieve(index: Index, queries: list[str], img_desc: str | None, context: st
         hits = [h for h in index.search(qq, k=TOP_K, expansion=exp) if h[1] >= MIN_SCORE]
         from rag import tokenize, SYMPTOM_TERMS
         if set(tokenize(qq)) & SYMPTOM_TERMS:
-            ts = [h for h in hits if "TROUBLESHOOT" in h[0].heading]
+            from rag import TS_RE
+            ts = [h for h in hits if TS_RE.search(h[0].heading)]
             if ts and hits and hits[0] is not ts[0]:
                 top = hits[0][1]
                 hits = [(ts[0][0], top * 1.02)] + [h for h in hits if h is not ts[0]]

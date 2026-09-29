@@ -43,6 +43,20 @@ Other savings: no chat history is sent to the model, and query expansion, langua
 
 **Cost dashboard (sidebar):** total spend against budget, images analysed, **average cost per image**, last image's tokens and ₹ cost, how many more images fit in the remaining budget, average cost per answer, and a breakdown by call type. Each answer also shows its own cost, with the image part split out. Rates come from Sarvam's published INR price list (`pricing.py`, overridable via env). Rough estimates: a first question costs about ₹0.03–0.06, a follow-up or multi-question message about ₹0.05–0.09 (planner plus answer), and a photo about ₹0.01–0.02. ₹100 covers roughly 1,200–2,000 answers.
 
+## Works with any bike manual
+
+Nothing in the code is tied to one brand. The loader reads each manual's own layout:
+
+- **Headings are detected adaptively.** It measures what this manual uses consistently: ALL CAPS (Royal Enfield), a larger font (most brands) or short bold titles. Using one signal per manual stops table headers or bold body text from being taken as headings.
+- **Page numbers** are read from the top *or* bottom of the page. Repeated headers and footers (model name, chapter title) are removed by frequency.
+- **Maintenance schedules** are rebuilt from the table grid for any layout (0.5/5/10 or 750/3,000/6,000 km columns, optional months row). Codes are expanded with the legend printed on the page ('I = Inspect'), and blank cells are kept.
+- **The troubleshooting section** is recognised under any common name ('Troubleshooting', 'Trouble Shooting', 'Fault finding').
+- **Prompts and synonyms are brand-neutral.** The answer-format example uses placeholders, never real values, so one bike's numbers can't leak into another's answer.
+
+`tests/test_universal.py` checks all of this on a synthetic manual for a fictional 'Acme Roadster 150' with a deliberately different layout. A test also fails if any brand-specific string appears in the prompts or vocabulary.
+
+**Known limits:** scanned (image-only) manuals need OCR first (they are flagged in the UI), and manuals in languages other than English aren't tested yet.
+
 ## Conversation memory and multi-question messages
 
 The agent handles follow-ups ("is it the same with a pillion?", "how often should I change it?") and several questions in one message ("What's the tyre pressure and which oil should I use?").
