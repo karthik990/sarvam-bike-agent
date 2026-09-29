@@ -45,6 +45,35 @@ CONVERSATIONS = {
 }
 
 
+# Answer-quality checks for the live run (beyond "cited the right page")
+QUALITY = {
+    "and when should I get it checked?": {"no_steps": True, "must": ["1,000"]},
+    "What is the tyre pressure?": {"no_steps": True, "must": ["32", "36"]},
+    "is it the same with a pillion?": {"no_steps": True, "must": ["36"]},
+    "And the engine oil grade?": {"no_steps": True, "must": ["15W"]},
+    "how often should I change it?": {"must": ["10"], "forbid": ["every 1,000 km or 1.5"]},
+    "the lights are dim too": {"avoid_pages": {"27", "91", "92"}, "must": ["battery"]},
+    "My bike won't start": {"avoid_text": ["back and forth"]},
+}
+
+
+def quality_issues(msg, answer):
+    q, issues = QUALITY.get(msg, {}), []
+    low = answer.lower()
+    if q.get("no_steps") and "🔧" in answer:
+        issues.append("procedure steps on a what/when question")
+    for m in q.get("must", []):
+        if m.lower() not in low:
+            issues.append(f"missing '{m}'")
+    for f in q.get("forbid", []) + q.get("avoid_text", []):
+        if f.lower() in low:
+            issues.append(f"contains '{f}'")
+    bad = set(re.findall(r"\(p\.(\d+)\)", answer)) & q.get("avoid_pages", set())
+    if bad:
+        issues.append(f"cites off-topic pages {sorted(bad)}")
+    return issues
+
+
 def offline(index, only=None):
     """Checks retrieval twice: with the ideal planner queries, and with the RAW message
     (what a first question uses, since the planner is skipped when there's no history)."""
@@ -80,11 +109,14 @@ def live(index, only=None):
             r = agent.answer(client, index, msg, history)
             cited = set(re.findall(r"\(p\.(\d+)\)", r.answer)) | set(re.findall(r"\*\*p\.([\d, ]+)\*\*", r.answer))
             cited = {c.strip() for x in cited for c in x.split(",")}
-            good = bool(cited & expected)
+            issues = quality_issues(msg, r.answer)
+            good = bool(cited & expected) and not issues
             total += 1; passed += good
             print(f"\n> {msg}\n  understood as: {r.standalone}\n  queries: {r.queries}\n"
                   f"  cited {sorted(cited)} (expected any of {sorted(expected)}) "
                   f"{'OK' if good else 'CHECK'}  calls={r.api_calls}")
+            if issues:
+                print(f"  QUALITY: {'; '.join(issues)}")
             if r.reason:
                 print(f"  reason: {r.reason}")
             if r.debug and (not good or r.reason):
@@ -94,7 +126,7 @@ def live(index, only=None):
                 print("  ! " + w)
             history += [{"role": "user", "content": msg, "standalone": r.standalone, "img_desc": r.image_description},
                         {"role": "assistant", "content": r.answer, "summary": r.summary}]
-    print(f"\nLive: {passed}/{total} answers cited an expected page. "
+    print(f"\nLive: {passed}/{total} answers cited an expected page and passed quality checks. "
           f"Total spend: ₹{client.spent:.3f} over {len(client.ledger)} calls")
 
 

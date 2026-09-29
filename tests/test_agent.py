@@ -273,3 +273,33 @@ def test_duplicate_lines_removed():
         "service_centre": [{"text": "Contact authorised service center.", "page": "109"}], "warnings": []}]},
         "en-IN", {"71", "104", "108", "109"})
     assert md.count("36 psi") == 1 and md.lower().count("contact authorised service center") == 1
+
+
+# ---------- answer tidiness (from live eval output) ----------
+def test_spec_guard_moves_non_specs_and_keeps_advice_first():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "Keep positive free play and visit a service centre.",
+          "spec": [P("Keep positive free play", "82"), P("Visit nearest service centre", "82"), P("Free play 10-12 mm", "82")],
+          "steps": [P(f"Step {i}", "82") for i in range(1, 12)], "service_centre": [], "warnings": []}]}
+    md, _, _ = agent.render(d, "en-IN", {"82"})
+    spec_block = md.split("**📏")[1].split("**🔧")[0]
+    assert "10-12 mm" in spec_block and "Keep positive" not in spec_block and "Visit nearest" not in spec_block
+    assert "1. Keep positive free play" in md and "remaining steps are in the manual" in md
+    assert "Visit nearest service centre" in md.split("**🏪")[1]
+
+def test_near_duplicate_specs_collapse_but_distinct_values_survive():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "s", "steps": [], "service_centre": [], "warnings": [],
+          "spec": [P("Front 32 psi", "16"), P("Rear 36 psi", "16"), P("Front 32 psi, Rear 36 psi", "71"),
+                   P("Rear 32 psi solo", "71")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"16", "71"})
+    assert md.count("36 psi") == 1 and "Rear 32 psi solo" in md
+
+def test_lazy_planner_echo_still_carries_context():
+    class Lazy(FakeSarvam):
+        def chat_json(self, *a, **k):
+            self.calls.append("plan"); return {"standalone": "What should I do if it keeps happening?", "queries": ["keeps happening"]}
+    h = [{"role": "user", "content": "white smoke from exhaust", "standalone": "white smoke from exhaust"},
+         {"role": "assistant", "content": "x", "summary": "condensation"}]
+    r = agent.answer(Lazy(), idx(), "What should I do if it keeps happening?", h)
+    assert "white smoke" in r.queries[0] and "following up on" in r.standalone

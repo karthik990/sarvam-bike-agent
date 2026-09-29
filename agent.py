@@ -31,7 +31,7 @@ MAX_SECTIONS = 5         # hard cap on sections in one prompt
 SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
 CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))  # strong match -> never show a bare refusal
-PROMPT_VERSION = "p9"    # bump whenever prompts/format change -> old cached answers are ignored
+PROMPT_VERSION = "p10"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
@@ -52,11 +52,13 @@ Return JSON: {"parts": [one object per question under QUESTIONS, same order], "n
 Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "warnings"} where the lists hold {"text", "page"} items.
 - found=true whenever ANY section contains information relevant to that question; give what the manual says, even if partial. found=false only if no section is about it.
 - summary: one plain sentence that directly answers that question.
+- Answer ONLY what was asked. 'What is / how much / when / how often' questions: give spec and summary, and leave steps empty. 'How do I / what should I check' questions: give steps. 'What if X can't be done' questions: give the manual's advice for that case (e.g. visit a service centre), not the whole procedure again.
+- Ignore sections that are not about the question (e.g. riding or gear-shifting steps for a starting problem, bulb replacement for dim lights caused by a weak battery).
 - spec: ONLY numbers, limits, grades or intervals (e.g. free play 10-12 mm; replace at 10 thousand km). Actions go in steps.
 - For 'how often' questions, quote the 'Maintenance item' line's schedule exactly as written (e.g. Replace at 0.5, 10, 20 thousand km); never turn a 'check level' note into a replacement interval. steps: the manual's check/procedure steps IN THE MANUAL'S ORDER, one short action each; never merge, reorder or invent.
 - service_centre: when the manual says to visit a service centre. warnings: only CAUTION/WARNING about this question's task.
 - page = digits of the nearest [p.N] marker ABOVE the text you used (e.g. "82").
-- Per part at most 4 spec, 6 steps, 2 warnings, 2 service_centre; each text under 18 words. No double quotes inside text.
+- Per part at most 4 spec, 8 steps, 2 warnings, 2 service_centre; never repeat the same fact in two lists; each text under 18 words. No double quotes inside text.
 - Never use knowledge outside the SECTIONS. not_covered: one short sentence on anything asked but not in the sections, else "".
 Example: {"parts":[{"question":"tyre pressure","found":true,"summary":"Front 32 psi; rear 32 psi solo, 36 psi with pillion.","spec":[{"text":"Front 32 psi, rear 32 psi (solo)","page":"71"},{"text":"Rear 36 psi with pillion","page":"71"}],"steps":[],"service_centre":[],"warnings":[]}],"not_covered":""}
 Write all text in {lang}."""
@@ -361,6 +363,53 @@ def _normalise(data: dict) -> dict:
     return {"parts": [], "not_covered": data.get("not_covered", "")}
 
 
+SPEC_TOKEN = re.compile(r"\d|\b(sae|api|jaso|psi|bar|mm|km|nm|litre|liter|ml|volt|amp)\b", re.I)
+CAPS = {"spec": 4, "steps": 8, "warnings": 3, "service_centre": 2}
+_W = re.compile(r"[a-z0-9]+")
+
+
+def _words(t: str) -> set[str]:
+    return {w for w in _W.findall(t.lower()) if len(w) > 2 or w.isdigit()}
+
+
+def tidy(spec, steps, warn, svc):
+    """Deterministic clean-up so layout doesn't depend on the model following instructions:
+    - 'Specification' holds only numbers/grades/intervals; other lines move to the right list
+    - near-duplicates (same words/numbers as a fuller line) are dropped from spec/warnings/service
+    - list lengths are capped; a truncated procedure points to its page"""
+    moved_spec, advice = [], []
+    for t, p in spec:
+        if SPEC_TOKEN.search(t):
+            moved_spec.append((t, p))
+        elif re.search(r"service cent|dealer", t, re.I):
+            svc.append((t, p))
+        elif re.match(r"(do not|don't|never|avoid|caution)\b", t, re.I):
+            warn.append((t, p))
+        else:
+            advice.append((t, p))
+    spec = moved_spec
+    steps = advice + [x for x in steps if x not in advice]      # direct advice first, then procedure
+
+    def drop_subsets(lst):
+        keep = []
+        order = sorted(range(len(lst)), key=lambda i: -len(_words(lst[i][0])))
+        chosen = []
+        for i in order:
+            w = _words(lst[i][0])
+            if any(w <= _words(lst[j][0]) for j in chosen):
+                continue
+            chosen.append(i)
+        for i in sorted(chosen):                       # keep original order
+            keep.append(lst[i])
+        return keep
+
+    spec, warn, svc = drop_subsets(spec), drop_subsets(warn), drop_subsets(svc)
+    if len(steps) > CAPS["steps"]:
+        last_page = steps[CAPS["steps"]][1]
+        steps = steps[:CAPS["steps"]] + [("… remaining steps are in the manual", last_page)]
+    return spec[:CAPS["spec"]], steps, warn[:CAPS["warnings"]], svc[:CAPS["service_centre"]]
+
+
 def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=None) -> tuple[str, int, int]:
     """Model JSON -> consistent markdown. Items are kept only if tied to a retrieved page.
     Returns (markdown, kept_items, dropped_items)."""
@@ -406,8 +455,8 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
         return out
 
     for n, part in enumerate(parts, 1):
-        spec, steps, warn, svc = dedupe([items(part, "spec"), items(part, "steps"),
-                                         items(part, "warnings"), items(part, "service_centre")])
+        spec, steps, warn, svc = tidy(*dedupe([items(part, "spec"), items(part, "steps"),
+                                                items(part, "warnings"), items(part, "service_centre")]))
         md = []
         if len(parts) > 1:
             md.append(f"#### {n}. {str(part.get('question', '')).strip() or 'Question ' + str(n)}")
@@ -500,6 +549,13 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     if p.get("language") and english_query is None and lang == "en-IN" and str(p["language"]).endswith("-IN"):
         lang = p["language"] if p["language"] in LANG_NAMES else lang
     standalone, queries = p["standalone"], p["queries"]
+    prev_u = next((m for m in reversed(history) if m["role"] == "user"), {})
+    prev_q = (prev_u.get("standalone") or prev_u.get("content", ""))[:200]
+    norm = lambda t: re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+    if prev_q and is_followup(question, history) and len(_words(standalone) - _words(q_en)) < 2:
+        # planner echoed the message back ('the lights are dim too'): carry the previous topic
+        queries = [f"{q} {prev_q}" for q in queries]
+        standalone = f"{q_en.rstrip('.?! ')} (following up on: {prev_q})"
     followup = is_followup(question, history) or (has_history(history) and standalone.lower() != q_en.lower())
 
     # 3) retrieve per question
