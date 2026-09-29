@@ -6,10 +6,22 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent import answer, cache_key, context_signature
+import importlib
+
 import pricing
-from rag import Index, load_pdf
-from sarvam_client import Sarvam
+import rag
+import sarvam_client
+import agent
+
+# Streamlit re-runs app.py on every interaction but keeps imported modules cached. After a redeploy
+# (e.g. a git push) that can leave an OLD agent.py in memory next to a NEW app.py. Reload our own
+# modules in dependency order so the app always runs one consistent version of the code.
+for _m in (pricing, rag, sarvam_client, agent):
+    importlib.reload(_m)
+
+from agent import answer, cache_key, context_signature  # noqa: E402
+from rag import Index, load_pdf  # noqa: E402
+from sarvam_client import Sarvam  # noqa: E402
 
 load_dotenv()
 st.set_page_config(page_title="Bike Troubleshooter · Sarvam", page_icon="🏍️", layout="wide")
@@ -154,6 +166,10 @@ if question:
                     with st.expander("Technical details"):
                         st.code(msg[:800])
                     st.stop()
+            # tolerate an older Result shape (e.g. a stale module after a redeploy) instead of crashing
+            for _a, _d in (("standalone", ""), ("summary", ""), ("followup", False), ("debug", ""), ("reason", "")):
+                if not hasattr(res, _a):
+                    setattr(res, _a, _d)
             for w in res.warnings:
                 st.warning(w)
             st.markdown(res.answer)
