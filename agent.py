@@ -580,7 +580,7 @@ def answer(client, index: Index, question: str, history: list[dict], *,
         best = max([s for _, _, hs in per_query for _, s in hs], default=None)
         if image and not img_desc:
             return Result("I couldn't analyse the photo (see warning above), and the question alone doesn't "
-                          "describe a symptom. Please type what you see, e.g. 'white smoke from the exhaust'.",
+                          "describe a symptom. Please type what you see, e.g. 'the ABS warning light stays on'.",
                           False, hits, None, shown_q, lang, warnings, calls,
                           reason="photo not analysed + question has no searchable symptom", **common)
         return Result(_refusal(lang), False, hits, img_desc, shown_q, lang, warnings, calls,

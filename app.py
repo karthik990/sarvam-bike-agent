@@ -101,7 +101,7 @@ with c1:
 with c2:
     audio = st.audio_input("Optional: ask by voice", key=f"aud_{n}") if hasattr(st, "audio_input") else None
 
-typed = st.chat_input("Describe the problem, e.g. 'Why is white smoke coming from my bike?'")
+typed = st.chat_input("Describe the problem, e.g. 'My bike won't start, what should I check?'")
 question, english_query, lang = typed, None, None
 
 if not question and audio is not None and client:
