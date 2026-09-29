@@ -32,7 +32,7 @@ Tests (no API key or credits needed; they use a synthetic manual and a mocked cl
 |---|---|
 | Text question (English) | **1** (`sarvam-105b`, reasoning off, 4 excerpts of ≤600 chars each, reply capped at 450 tokens) |
 | + new photo | **+1** (`gemma4`, image downscaled to 512 px, reply capped at 80 tokens; a repeat photo is cached and costs 0) |
-| Typed Hindi/Kannada/… | **+1** tiny translate call (≤80 tokens) |
+| Follow-up / several questions / typed Hindi, Kannada… | **+1** small planner call (≤160 tokens out) |
 | Voice question | STT only. Saaras `translate` mode returns English directly, so no extra LLM call |
 | Manual doesn't cover it | **0**. Refused locally when BM25 score < `MIN_BM25_SCORE` |
 | Repeated question | **0**. Answers are cached on disk in `.cache/answers.json` |
@@ -41,16 +41,18 @@ Tests (no API key or credits needed; they use a synthetic manual and a mocked cl
 
 Other savings: no chat history is sent to the model, and query expansion, language detection, retrieval and citation checks all run locally. A **session budget guard** (`SARVAM_BUDGET_INR`, default ₹100) blocks further calls once it's reached.
 
-**Cost dashboard (sidebar):** total spend against budget, images analysed, **average cost per image**, last image's tokens and ₹ cost, how many more images fit in the remaining budget, average cost per answer, and a breakdown by call type. Each answer also shows its own cost, with the image part split out. Rates come from Sarvam's published INR price list (`pricing.py`, overridable via env). Rough estimates: an answer costs about ₹0.03–0.05 and a photo about ₹0.01–0.02, so ₹100 covers roughly 2,000 answers.
+**Cost dashboard (sidebar):** total spend against budget, images analysed, **average cost per image**, last image's tokens and ₹ cost, how many more images fit in the remaining budget, average cost per answer, and a breakdown by call type. Each answer also shows its own cost, with the image part split out. Rates come from Sarvam's published INR price list (`pricing.py`, overridable via env). Rough estimates: a first question costs about ₹0.03–0.06, a follow-up or multi-question message about ₹0.05–0.09 (planner plus answer), and a photo about ₹0.01–0.02. ₹100 covers roughly 1,200–2,000 answers.
 
-## Conversation memory (multi-turn chat)
+## Conversation memory and multi-question messages
 
-Follow-ups like *"and the chain?"*, *"what tool do I need for it?"* or *"what if it keeps happening?"* work across prompts:
+The agent handles follow-ups ("is it the same with a pillion?", "how often should I change it?") and several questions in one message ("What's the tyre pressure and which oil should I use?").
 
-- **Follow-up detection is local (0 tokens).** A reference word ("it", "that", "also", "what about"…) marks a follow-up. A new topic ("How do I check the oil?") or a new photo starts fresh.
-- **Follow-ups inherit the previous topic** for retrieval, plus the previous **photo description**, and keep the **manual sections just discussed** in play.
-- **Compact memory:** only the last 2 exchanges are sent, as *question + one-line summary*, never full answers. That adds about 60 tokens, and only on follow-ups. The model uses it just to work out what "it" refers to; facts still come from the manual.
-- Cached answers take the context into account, so the same follow-up after different questions isn't confused. **🆕 New conversation** resets memory.
+1. **Planner step (one small call, ~₹0.01).** It runs only when needed: there is conversation history, the message has several questions, or it isn't in English. It rewrites the message as a **standalone question** ("how often should I change it?" → "How often should the engine oil be changed?") and produces **one search query per question**. A simple first question skips it.
+2. **Retrieval runs separately for each question,** so one question can't crowd out another. "How often / when" questions also pull the matching row of the **periodical maintenance chart**.
+3. **The answer comes in parts,** one per question, each with its own page citations.
+4. **Memory holds standalone questions and one-line summaries**, never whole answers and never an ever-growing topic string. This fixed the earlier drift, where turn 5 was still searching for tyre pressure.
+
+**Evaluation:** `python eval.py manual.pdf` checks 13 questions over 4 conversations (follow-ups, topic switches, multi-question messages, a troubleshooting chain) against the manual pages that hold the answers. Current result: **13/13**. `python eval.py manual.pdf --live` runs the same conversations on Sarvam and prints each answer, how it was understood, what it cited, and the cost (about ₹1 in total).
 
 ## Approach
 

@@ -159,6 +159,12 @@ class Sarvam:
                     v.pop()
         return data if isinstance(data, dict) else {}
 
+    def chat_json(self, messages, max_tokens: int = 160) -> dict:
+        """Small JSON call (query planning). Reasoning off; repairs bad JSON; never raises on parse."""
+        raw = self.chat(messages, max_tokens=max_tokens, kind="plan", response_format={"type": "json_object"})
+        data = parse_json_loose(raw)
+        return data if isinstance(data, dict) else {}
+
     def to_english_keywords(self, text: str) -> str:
         """Only used for typed non-English questions (voice uses Saaras translate instead)."""
         return self.chat([

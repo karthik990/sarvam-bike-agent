@@ -50,6 +50,12 @@ SYNONYMS = {
     "headlight": "headlamp bulb",
     "horn": "horn switch fuse",
     "fuse": "fuse blown",
+    "how often": "periodical maintenance interval km months schedule",
+    "interval": "periodical maintenance km months schedule",
+    "when should": "periodical maintenance interval km months",
+    "service schedule": "periodical maintenance km months",
+    "change it": "replace",
+    "does not start": "engine does not start",
 }
 
 
@@ -173,6 +179,7 @@ class Index:
         self.chunks = chunks
         corpus = [tokenize(c.heading + " " + c.heading + " " + c.text) for c in chunks]  # heading weighted x2
         self.bm25 = BM25Okapi(corpus) if chunks else None
+        self._flat = [re.sub(r"[^a-z0-9]+", " ", (c.heading + " " + c.text).lower()) for c in chunks]
 
     def search(self, query: str, k: int = 6, expansion: str = "", w_exp: float = 0.35):
         """Score = BM25(user terms) + w_exp * BM25(expansion terms) + phrase bonus.
@@ -187,18 +194,40 @@ class Index:
         if ex:
             es = self.bm25.get_scores(ex)
             scores = [a + w_exp * b for a, b in zip(scores, es)]
-        # exact adjacent-word phrases from the query (e.g. "white smoke") get a bonus
-        words = [w for w in re.findall(r"[a-z]+", query.lower()) if w not in STOP]
-        phrases = {f"{a} {b}" for a, b in zip(words, words[1:])}
+        # exact phrases get a bonus. Built from the RAW words (stop-words kept) so "engine does not
+        # start" matches that troubleshooting row rather than "engine starts but shuts off".
+        def grams(text, weight3, weight2):
+            raw = re.findall(r"[a-z0-9]+", text.lower())
+            out = {}
+            for i in range(len(raw) - 2):              # trigrams with at least one content word
+                g = raw[i:i + 3]
+                if any(w not in STOP for w in g):
+                    out[" ".join(g)] = weight3
+            for i in range(len(raw) - 1):              # bigrams: two content words, or a negation
+                a, b = raw[i], raw[i + 1]
+                if (a not in STOP and b not in STOP) or (a in ("not", "no") and b not in STOP):
+                    out.setdefault(f"{a} {b}", weight2)
+            return out
+
+        phrases = grams(query, 3.0, 2.0)
+        for ph, w in grams(expansion, 0.0, 1.0).items():   # manual vocabulary from expansion, weaker
+            phrases.setdefault(ph, w)
+        phrases = {k: v for k, v in phrases.items() if v > 0}
         if phrases:
+            for i in range(len(self.chunks)):
+                low = self._flat[i]
+                bonus = sum(w for ph, w in phrases.items() if ph in low)
+                if bonus:
+                    scores[i] += bonus
+        # the troubleshooting table is authoritative for SYMPTOMS (not for maintenance questions)
+        if set(q) & SYMPTOM_TERMS:
             for i, c in enumerate(self.chunks):
-                low = re.sub(r"\s+", " ", c.text.lower())
-                hits = sum(1 for ph in phrases if ph in low)
-                if hits:
-                    scores[i] += 2.0 * hits
-        # the manual's troubleshooting table is the most authoritative place for symptoms
-        for i, c in enumerate(self.chunks):
-            if scores[i] > 0 and "TROUBLESHOOT" in c.heading:
-                scores[i] *= 1.6
+                if scores[i] > 0 and "TROUBLESHOOT" in c.heading:
+                    scores[i] *= 1.6
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
         return [(self.chunks[i], float(scores[i])) for i in ranked if scores[i] > 0]
+
+
+# stems of words that describe a SYMPTOM (used to decide when to favour the troubleshooting table)
+SYMPTOM_TERMS = {stem(w) for w in """start starting stop stops shut shuts misfire misfires erratic pickup
+abs mil lamp light lights dim horn fuse blown battery hot overheat overheating smoke noise vibration""".split()}

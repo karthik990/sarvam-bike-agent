@@ -119,7 +119,7 @@ if not question and img_file is not None and st.button("Ask about this photo"):
 
 if question:
     image = img_file.getvalue() if img_file is not None else None
-    MEMORY_KEYS = ("role", "content", "summary", "section_ids", "topic", "img_desc")
+    MEMORY_KEYS = ("role", "content", "summary", "standalone", "img_desc")
     history = [{k: m[k] for k in MEMORY_KEYS if k in m} for m in ss.messages]
     with st.chat_message("user"):
         if image:
@@ -164,7 +164,9 @@ if question:
             st.caption(" · ".join(parts))
             if res.followup:
                 st.caption("💬 Follow-up: used context from the previous question")
-            r = {"summary": res.summary, "section_ids": res.section_ids, "topic": res.topic,
+            if res.standalone and res.standalone.strip().lower() != question.strip().lower():
+                st.caption(f"🧭 Understood as: *{res.standalone}*")
+            r = {"summary": res.summary, "standalone": res.standalone,
                  "cost": total, "img_cost": img_cost, "answer": res.answer, "lang": res.language, "img": res.image_description, "query": res.query,
                  "sources": [{"page": c.label, "heading": c.heading, "text": c.text[:600], "score": s}
                              for c, s in res.sources]}
@@ -182,9 +184,9 @@ if question:
                 st.markdown(f"**p.{s['page']}** {('— ' + s['heading']) if s['heading'] else ''} · score {s['score']:.2f}")
                 st.text(s["text"])
     # conversation memory for the next turn (kept small: topic, photo description, summary, sections)
-    ss.messages[-1].update(topic=r.get("topic") or question, img_desc=r.get("img"))
+    ss.messages[-1].update(standalone=r.get("standalone") or question, img_desc=r.get("img"))
     ss.messages.append({"role": "assistant", "content": r["answer"], "lang": r["lang"],
-                        "summary": r.get("summary", ""), "section_ids": r.get("section_ids", [])})
+                        "summary": r.get("summary", "")})
 
 # TTS only on explicit click (never automatic)
 if client and ss.messages and ss.messages[-1]["role"] == "assistant":
