@@ -180,7 +180,8 @@ def holdout_live(index, dataset=None):
         history = []
         for msg, expected, must in turns:
             r = agent.answer(client, index, msg, history)
-            cited = set(re.findall(r"\(p\.(\d+)\)", r.answer))
+            cited = agent.cited_pages(r.answer) | {c.strip() for x in re.findall(r"\*\*p\.([\d, ]+)\*\*", r.answer)
+                                                    for c in x.split(",")}
             low = r.answer.lower()
             if expected is None:
                 declined = (not r.found) or ("not covered" in low and not cited)
@@ -230,7 +231,7 @@ def quality_issues(msg, answer):
     for f in q.get("forbid", []) + q.get("avoid_text", []):
         if f.lower() in low:
             issues.append(f"contains '{f}'")
-    bad = set(re.findall(r"\(p\.(\d+)\)", answer)) & q.get("avoid_pages", set())
+    bad = agent.cited_pages(answer) & q.get("avoid_pages", set())
     if bad:
         issues.append(f"cites off-topic pages {sorted(bad)}")
     return issues
@@ -271,8 +272,8 @@ def live(index, only=None):
         history = []
         for msg, _, expected in turns:
             r = agent.answer(client, index, msg, history)
-            cited = set(re.findall(r"\(p\.(\d+)\)", r.answer)) | set(re.findall(r"\*\*p\.([\d, ]+)\*\*", r.answer))
-            cited = {c.strip() for x in cited for c in x.split(",")}
+            cited = agent.cited_pages(r.answer) | {c.strip() for x in re.findall(r"\*\*p\.([\d, ]+)\*\*", r.answer)
+                                                    for c in x.split(",")}
             issues = quality_issues(msg, r.answer)
             good = bool(cited & expected) and not issues
             total += 1; passed += good

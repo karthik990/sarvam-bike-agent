@@ -70,7 +70,8 @@ def test_end_to_end_interval_answer_on_other_manual():
     m = Model()
     r = agent.answer(m, idx, "How often should I change the engine oil?", [])
     assert "Engine oil: Replace at 750, 6,000, 12,000 km" in m.prompt
-    assert r.found and "(p.5)" in r.answer and "12,000" in r.answer
+    assert r.found and agent.cited_pages(r.answer) == {"5"} and "12,000" in r.answer
+    assert "(p." not in r.answer                                   # no inline references
 
 
 # ---------- lessons from a real second manufacturer's manual (Honda Shine 100) ----------

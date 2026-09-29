@@ -9,6 +9,7 @@ LLM = {  # model: (input, output) ₹ per 1M tokens
 }
 STT_PER_HOUR = float(os.getenv("PRICE_STT_PER_HOUR", "30"))      # Saaras transcribe / translate
 TTS_PER_10K_CHARS = float(os.getenv("PRICE_TTS_PER_10K", "30"))  # Bulbul v3
+TRANSLATE_PER_10K_CHARS = float(os.getenv("PRICE_TRANSLATE_PER_10K", "20"))  # Sarvam Translate
 FREE_CREDITS = float(os.getenv("SARVAM_BUDGET_INR", "100"))      # new accounts get ₹100
 
 
@@ -23,6 +24,10 @@ def stt_cost(seconds: float) -> float:
 
 def tts_cost(chars: int) -> float:
     return chars / 10_000 * TTS_PER_10K_CHARS
+
+
+def translate_cost(chars: int) -> float:
+    return chars / 10_000 * TRANSLATE_PER_10K_CHARS
 
 
 def inr(x: float) -> str:

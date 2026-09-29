@@ -10,6 +10,7 @@ Everything runs on Sarvam APIs:
 | Reasoning and grounded answers | `sarvam-105b` (the model behind Sarvam Indus) | Strong reasoning, native Indic languages |
 | Photo → symptom description | `gemma4` via Sarvam `/v2/chat/completions` (beta) | `sarvam-105b` is text-only; Sarvam Vision is built for document OCR, not scene photos |
 | Voice question (bonus) | `saaras:v3` STT | Handles Hindi, Kannada, Hinglish and more |
+| Answer in the user's language | `sarvam-translate:v1` | The answer is generated and checked against the manual in English, then translated with its layout kept (22 languages) |
 | Spoken answer (bonus) | `bulbul:v3` TTS | Reads the answer in the user's language |
 
 ## Run
@@ -101,6 +102,7 @@ Key design choices:
    - *Chunks follow the manual's own sections.* The text is split on the manual's ALL-CAPS headings and the repeated page headers are stripped, so one topic's caution can't leak into another's answer. Each hit is expanded to its whole section, so procedures arrive complete and in order.
    - *The model returns structured JSON* (summary, spec, steps, warnings, service centre, not covered), constrained by a JSON schema. The app renders it in the same layout every time and drops empty sections.
    - *Tables are rebuilt before indexing.* When a PDF is flattened, the periodic-maintenance chart becomes 'Engine oil R I R I R …' and loses its columns; that made the model answer 'change oil every 1,000 km'. Each chart row is rebuilt from the exact cell grid (PyMuPDF `find_tables`, blank cells kept) into a sentence: 'Engine oil: Replace at 0.5, 10, 20 … thousand km (1.5, 12, 24 … months); Inspect at 5, 15 … ; check level every 1,000 km'.
+   - *Answers list their sources once, at the end* ('📖 Sources: p.31, p.74'), but every item is still checked against its page before it is shown.
    - *Every item carries its own page number, and citations use the page numbers printed in the manual*, i.e. what the owner sees on the page. Any item citing a page that wasn't retrieved is dropped.
 
 1. **The vision model describes but never diagnoses.** It only reports what it can see (e.g. "thick white smoke from the exhaust pipe"). That description becomes part of the search query. The diagnosis always comes from the manual, which keeps a capable VLM from bringing in its own general mechanical knowledge.

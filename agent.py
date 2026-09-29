@@ -32,7 +32,7 @@ SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
 CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))
 WEAK_SCORE = float(os.getenv("WEAK_SCORE", "9"))  # first question matched weakly -> let the planner reword it  # strong match -> never show a bare refusal
-PROMPT_VERSION = "p12"    # bump whenever prompts/format change -> old cached answers are ignored
+PROMPT_VERSION = "p13"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
@@ -66,7 +66,7 @@ Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "
 - Per part at most 4 spec, 8 steps, 2 warnings, 2 service_centre; never repeat the same fact in two lists; each text under 18 words. No double quotes inside text.
 - Never use knowledge outside the SECTIONS. not_covered: one short sentence on anything asked but not in the sections, else "".
 Format example (placeholders, NOT real values; always take values from the SECTIONS): {"parts":[{"question":"<question>","found":true,"summary":"<one sentence with the manual's value>","spec":[{"text":"<item> <value with unit>","page":"<N>"}],"steps":[],"service_centre":[],"warnings":[]}],"not_covered":""}
-Write all text in {lang}."""
+Write all text in English (the app translates the final answer into the owner's language).{lang_note}"""
 
 ITEM = {"type": "object", "properties": {"text": {"type": "string"}, "page": {"type": "string"}},
         "required": ["text", "page"], "additionalProperties": False}
@@ -521,9 +521,10 @@ def tidy(spec, steps, warn, svc):
 def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=None) -> tuple[str, int, int]:
     """Model JSON -> consistent markdown. Items are kept only if tied to a retrieved page.
     Returns (markdown, kept_items, dropped_items)."""
-    h = HEADINGS.get(lang.split("-")[0], HEADINGS["en"])
+    h = HEADINGS["en"]                       # rendered in English; translated afterwards if needed
     sources, pdf2label = sources or [], pdf2label or {}
     data = _normalise(data)
+    cited: set[str] = set()
     render.dropped_raw = []
     kept = dropped = 0
 
@@ -590,19 +591,78 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
             continue
         if part.get("summary"):
             md.append(f"**{str(part['summary']).strip()}**")
+        cited.update(p for _, p in spec + steps + warn + svc)
         if spec:
-            md.append(f"\n**📏 {h[0]}**\n" + "\n".join(f"- {t} *(p.{p})*" for t, p in spec))
+            md.append(f"\n**📏 {h[0]}**\n" + "\n".join(f"- {t}" for t, _ in spec))
         if steps:
-            md.append(f"\n**🔧 {h[1]}**\n" + "\n".join(f"{i}. {t} *(p.{p})*" for i, (t, p) in enumerate(steps, 1)))
+            md.append(f"\n**🔧 {h[1]}**\n" + "\n".join(f"{i}. {t}" for i, (t, _) in enumerate(steps, 1)))
         if warn:
-            md.append(f"\n**⚠️ {h[3]}**\n" + "\n".join(f"- {t} *(p.{p})*" for t, p in warn))
+            md.append(f"\n**⚠️ {h[3]}**\n" + "\n".join(f"- {t}" for t, _ in warn))
         if svc:
-            md.append(f"\n**🏪 {h[2]}**\n" + "\n".join(f"- {t} *(p.{p})*" for t, p in svc))
+            md.append(f"\n**🏪 {h[2]}**\n" + "\n".join(f"- {t}" for t, _ in svc))
         blocks.append("\n".join(md))
     nc = (data.get("not_covered") or "").strip()
     if nc and NOT_FOUND not in nc:
         blocks.append(f"*{h[4]}: {nc}*")
+    if cited:
+        blocks.append(sources_line(cited))
     return "\n\n".join(blocks), kept, dropped
+
+
+def sources_line(pages, label: str = "Sources") -> str:
+    """All page references in ONE line at the end (every item is still checked against its page)."""
+    ordered = sorted(set(pages), key=lambda x: int(x) if str(x).isdigit() else 10**6)
+    return f"📖 **{label}:** " + ", ".join(f"p.{p}" for p in ordered)
+
+
+def cited_pages(answer_md: str) -> set[str]:
+    """Pages listed in the Sources line (used by the eval)."""
+    m = re.search(r"📖[^\n]*", answer_md)
+    return set(re.findall(r"p\.(\d+)", m.group(0))) if m else set()
+
+
+SOURCES_LABEL = {"hi": "स्रोत", "mr": "स्रोत", "bn": "সূত্র", "gu": "સ્રોત", "pa": "ਸਰੋਤ", "od": "ଉତ୍ସ",
+                 "ta": "ஆதாரங்கள்", "te": "మూలాలు", "kn": "ಮೂಲಗಳು", "ml": "ഉറവിടങ്ങൾ"}
+_LINE = re.compile(r"^(\s*(?:#{1,6}\s+)?(?:\d+\.\s+|[-•]\s+|>\s+)?(?:\*\*|\*)?(?:📏|🔧|⚠️|🏪|🎙️)?\s*)(.*?)(\*\*|\*)?\s*$")
+
+
+def translate_answer(client, md: str, lang: str) -> tuple[str, bool]:
+    """Translate a rendered English answer into the owner's language while keeping the layout:
+    markdown markers stay, only the text is translated, lines are batched into few requests
+    (<=1800 chars each). The Sources line is kept, with a localised label."""
+    if lang == "en-IN" or client is None or not hasattr(client, "translate"):
+        return md, True
+    lines = md.split("\n")
+    slots = []                                   # (line index, prefix, text, suffix)
+    for i, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("📖"):
+            continue
+        m = _LINE.match(line)
+        prefix, text, suffix = m.group(1), m.group(2), m.group(3) or ""
+        if re.search(r"[A-Za-z]", text):
+            slots.append((i, prefix, text, suffix))
+    batches, cur, size = [], [], 0
+    for sl in slots:
+        if cur and size + len(sl[2]) + 1 > 1800:
+            batches.append(cur); cur, size = [], 0
+        cur.append(sl); size += len(sl[2]) + 1
+    if cur:
+        batches.append(cur)
+    try:
+        for batch in batches:
+            out = client.translate("\n".join(t for _, _, t, _ in batch), lang).split("\n")
+            out = [o for o in out if o.strip()] if len(out) != len(batch) else out
+            if len(out) != len(batch):           # translator merged/split lines: go line by line
+                out = [client.translate(t, lang) for _, _, t, _ in batch]
+            for (i, prefix, _, suffix), tr in zip(batch, out):
+                lines[i] = f"{prefix}{tr.strip()}{suffix}"
+    except Exception:
+        return md, False
+    label = SOURCES_LABEL.get(lang.split("-")[0])
+    result = "\n".join(lines)
+    if label:
+        result = result.replace("📖 **Sources:**", f"📖 **{label}:**")
+    return result, True
 
 
 def extractive_answer(sections) -> str:
@@ -728,7 +788,7 @@ def answer(client, index: Index, question: str, history: list[dict], *,
             + (f"MEANING IN CONTEXT: {standalone}\n" if standalone.lower() != question.lower() else "")
             + f"QUESTIONS:\n{qlist}" + (f"\nPHOTO SHOWS: {img_desc}" if img_desc else ""))
     data = client.chat_structured([
-        {"role": "system", "content": ANSWER_SYS.replace("{lang}", LANG_NAMES.get(lang, "English"))},
+        {"role": "system", "content": ANSWER_SYS.replace("{lang_note}", "")},
         {"role": "user", "content": user},
     ], SCHEMA, "manual_answer", max_tokens=1100 + 500 * (len(queries) - 1))
     calls += 1
@@ -767,5 +827,10 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     if kept == 0:
         return fail("no answer item could be tied to a retrieved page")
     summary = " | ".join(str(pt.get("summary", "")).strip() for pt in data["parts"] if pt.get("found"))[:300]
+    if lang != "en-IN":
+        text, ok = translate_answer(client, text, lang)
+        calls += ok and 1
+        if not ok:
+            warnings.append(f"Couldn't translate the answer into {LANG_NAMES.get(lang, lang)}; showing English.")
     return Result(text, True, hits, img_desc, shown_q, lang, warnings, calls,
                   summary=summary, section_ids=section_ids, **common)

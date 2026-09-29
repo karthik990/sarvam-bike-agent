@@ -397,3 +397,59 @@ def test_near_duplicate_steps_merge_but_numbers_protect():
                     P("Wait 20 seconds before repeating", "2")]}]}
     md, _, _ = agent.render(d, "en-IN", {"2"})
     assert md.count("10 seconds") == 1 and "20 seconds" in md
+
+
+# ---------- references at the end + answers in the user's language ----------
+def test_references_listed_once_at_the_end():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "Set free play to 10-12 mm.",
+          "spec": [P("Free play 10-12 mm", "81")], "steps": [P("Loosen the adjuster nuts", "82")],
+          "service_centre": [], "warnings": []}]}
+    md, _, _ = agent.render(d, "en-IN", {"81", "82"})
+    assert "(p." not in md and md.strip().splitlines()[-1] == "📖 **Sources:** p.81, p.82"
+    assert agent.cited_pages(md) == {"81", "82"}
+
+class FakeTranslator:
+    """Stand-in for Sarvam Translate: prefixes each line with [hi] so we can see what was translated."""
+    def __init__(self, merge=False, fail=False): self.merge, self.fail, self.calls = merge, fail, []
+    def translate(self, text, target, source="en-IN"):
+        self.calls.append(text)
+        if self.fail: raise RuntimeError("503")
+        lines = [f"[{target[:2]}] {l}" for l in text.split("\n")]
+        return " ".join(lines) if (self.merge and len(lines) > 1) else "\n".join(lines)
+
+def _sample_md():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "Check the kill switch and fuel.",
+          "spec": [P("Battery 12 V 3 Ah", "99")], "steps": [P("Switch ON the ignition", "74"), P("Top up the fuel", "74")],
+          "service_centre": [P("Contact your dealer if the lamp stays on", "74")], "warnings": []}]}
+    return agent.render(d, "en-IN", {"74", "99"})[0]
+
+def test_answer_translated_with_layout_kept():
+    t = FakeTranslator()
+    out, ok = agent.translate_answer(t, _sample_md(), "hi-IN")
+    assert ok and len(t.calls) == 1                                  # batched into one request
+    assert "**[hi] Check the kill switch and fuel.**" in out            # bold kept
+    assert "1. [hi] Switch ON the ignition" in out and "- [hi] Battery 12 V 3 Ah" in out
+    assert "**📏 [hi] Specification**" in out                          # headings translated, emoji kept
+    assert out.strip().splitlines()[-1] == "📖 **स्रोत:** p.74, p.99"   # sources kept, label localised
+
+def test_translation_falls_back_line_by_line_then_to_english():
+    t = FakeTranslator(merge=True)
+    out, ok = agent.translate_answer(t, _sample_md(), "kn-IN")
+    assert ok and "1. [kn] Switch ON the ignition" in out and len(t.calls) > 1
+    md = _sample_md()
+    out, ok = agent.translate_answer(FakeTranslator(fail=True), md, "hi-IN")
+    assert not ok and out == md                                        # English shown, never an error
+
+def test_english_answers_are_not_translated():
+    t = FakeTranslator(); md = _sample_md()
+    assert agent.translate_answer(t, md, "en-IN") == (md, True) and t.calls == []
+
+def test_hindi_question_gets_hindi_answer_end_to_end():
+    class Model(FakeSarvam, FakeTranslator):
+        def __init__(self): FakeSarvam.__init__(self); FakeTranslator.__init__(self)
+    m = Model()
+    r = agent.answer(m, idx(), "बाइक स्टार्ट नहीं हो रही", [])
+    assert r.language == "hi-IN" and "[hi]" in r.answer and "स्रोत" in r.answer
+    assert "Write all text in English" in m.last[0]["content"]          # model writes English, app translates

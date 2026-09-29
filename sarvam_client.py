@@ -180,6 +180,15 @@ class Sarvam:
         data = parse_json_loose(raw)
         return data if isinstance(data, dict) else {}
 
+    def translate(self, text: str, target: str, source: str = "en-IN") -> str:
+        """Sarvam Translate (sarvam-translate:v1: all 22 scheduled Indian languages, <=2000 chars)."""
+        resp = self._post("/translate", json_body={
+            "input": text[:2000], "source_language_code": source, "target_language_code": target,
+            "model": "sarvam-translate:v1", "numerals_format": "international",
+        })
+        self._log("translate_answer", "sarvam-translate:v1", cost=pricing.translate_cost(len(text[:2000])))
+        return resp.get("translated_text", "")
+
     def to_english_keywords(self, text: str) -> str:
         """Only used for typed non-English questions (voice uses Saaras translate instead)."""
         return self.chat([
@@ -229,6 +238,7 @@ class Sarvam:
         return resp.get("transcript", ""), resp.get("language_code")
 
     def speak(self, text: str, language_code: str = "en-IN") -> bytes:
+        text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("📖"))   # don't read sources aloud
         text = re.sub(r"\[p\.\s*\d+[^\]]*\]", "", text)
         text = re.sub(r"[*#_`>]", "", text)[:1200]
         self.usage["tts_chars"] += len(text)
