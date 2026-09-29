@@ -372,3 +372,28 @@ def test_spec_consequences_and_actions_move_out():
     spec = md.split("**📏")[1].split("**🔧")[0]
     assert "25 - 30 mm" in spec and "Replace at 0.5" in spec and "will lead" not in spec and "Unwind" not in spec
     assert "will lead" in md.split("**⚠️")[1] and md.lower().count("same rating") == 1
+
+
+# ---------- regressions from a real user conversation on another manual ----------
+def test_contractions_are_normalised():
+    from rag import tokenize
+    assert tokenize("lights don't work") == ["light", "work"]
+    assert tokenize("Don’t drink and ride") == ["drink", "rid"]           # no stray 'don' / 't' tokens
+    assert "not" not in tokenize("won't start") and "start" in tokenize("won't start")
+
+def test_topic_bleed_guard():
+    h = [{"role": "user", "content": "how to put petrol", "standalone": "How do I refuel?"},
+         {"role": "assistant", "content": "x", "summary": "Use unleaded petrol"}]
+    assert agent.guard_topic_bleed("no my bike lights don't work",
+                                   ["fuel tank capacity", "lights do not work", "petrol tank cap open"], h, "en-IN") == ["lights do not work"]
+    assert agent.guard_topic_bleed("is it the same with a pillion?", ["tyre pressure with pillion"], h, "en-IN") == ["tyre pressure with pillion"]
+    assert agent.guard_topic_bleed("no petrol", ["refuelling fuel tank empty"], h, "en-IN") == ["refuelling fuel tank empty"]
+    assert agent.guard_topic_bleed("lights don't work", ["fuel tank capacity"], h, "en-IN") == ["lights don't work"]   # all bled -> message itself
+
+def test_near_duplicate_steps_merge_but_numbers_protect():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "s", "spec": [], "service_centre": [], "warnings": [],
+          "steps": [P("Wait for 10 seconds before trying again", "2"), P("Wait 10 seconds before repeating", "2"),
+                    P("Wait 20 seconds before repeating", "2")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"2"})
+    assert md.count("10 seconds") == 1 and "20 seconds" in md

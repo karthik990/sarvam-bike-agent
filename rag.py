@@ -57,6 +57,18 @@ SYNONYMS = {
     "change it": "replace",
     "does not start": "engine does not start",
     "petrol": "fuel",
+    "put petrol": "refuelling opening the fuel fill cap filler neck",
+    "put fuel": "refuelling opening the fuel fill cap filler neck",
+    "fill up": "refuelling fuel fill cap filler neck",
+    "fill petrol": "refuelling fuel fill cap filler neck",
+    "refuel": "refuelling fuel fill cap filler neck",
+    "empty tank": "refuelling fuel level",
+    "no petrol": "refuelling fuel level empty",
+    "no fuel": "refuelling fuel level empty",
+    "lights do not work": "burned out light bulb blown fuse electrical trouble headlight",
+    "light not working": "burned out light bulb blown fuse electrical trouble headlight",
+    "no lights": "burned out light bulb blown fuse electrical trouble",
+    "bulb": "burned out light bulb replace",
     "gas ": "fuel",
     "tank hold": "fuel tank capacity",
     "hold": "capacity",
@@ -77,8 +89,20 @@ SYNONYMS = {
 }
 
 
+_CONTRACTIONS = [(r"won['’]t", "will not"), (r"can['’]t", "cannot"), (r"n['’]t\b", " not"), (r"['’]s\b", ""),
+                 (r"['’]re\b", " are"), (r"['’]ll\b", " will"), (r"['’]ve\b", " have"), (r"['’]d\b", " would")]
+
+
+def norm_text(text: str) -> str:
+    """Lower-case and expand contractions so "don't" never becomes the tokens 'don' + 't'."""
+    t = text.lower()
+    for pat, rep in _CONTRACTIONS:
+        t = re.sub(pat, rep, t)
+    return t
+
+
 def expansion_terms(q: str) -> str:
-    ql = q.lower()
+    ql = q.lower() + " " + norm_text(q)
     return " ".join(v for k, v in SYNONYMS.items() if k in ql)
 
 
@@ -101,7 +125,7 @@ def stem(t: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    toks = re.findall(r"[a-z0-9]+", text.lower())
+    toks = re.findall(r"[a-z0-9]+", norm_text(text))
     out = []
     for t in toks:
         if t in STOP or len(t) < 2:
@@ -521,7 +545,7 @@ class Index:
         self.chunks = chunks
         corpus = [tokenize(c.heading + " " + c.heading + " " + c.text) for c in chunks]  # heading weighted x2
         self.bm25 = BM25Okapi(corpus) if chunks else None
-        self._flat = [re.sub(r"[^a-z0-9]+", " ", (c.heading + " " + c.text).lower()) for c in chunks]
+        self._flat = [re.sub(r"[^a-z0-9]+", " ", norm_text(c.heading + " " + c.text)) for c in chunks]
 
     def search(self, query: str, k: int = 6, expansion: str = "", w_exp: float = 0.35):
         """Score = BM25(user terms) + w_exp * BM25(expansion terms) + phrase bonus.
@@ -540,7 +564,7 @@ class Index:
         # exact phrases get a bonus. Built from the RAW words (stop-words kept) so "engine does not
         # start" matches that troubleshooting row rather than "engine starts but shuts off".
         def grams(text, weight3, weight2):
-            raw = re.findall(r"[a-z0-9]+", text.lower())
+            raw = re.findall(r"[a-z0-9]+", norm_text(text))
             out = {}
             for i in range(len(raw) - 2):              # trigrams with at least one content word
                 g = raw[i:i + 3]

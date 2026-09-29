@@ -123,6 +123,13 @@ HONDA_SHINE100 = {
         ("How do I adjust the drive chain?", {"64", "65", "66", "67"}, []),
         ("how often should it be lubricated?", {"32", "64", "65", "66", "67"}, ["500"]),
     ],
+    "real user conversation (topic switches, short replies, corrections)": [
+        ("bike doesn't start", {"74"}, []),
+        ("no petrol", {"31", "11", "12"}, []),
+        ("how to put petrol", {"31"}, []),
+        ("lights don't work", {"82", "83", "84", "85", "77"}, []),
+        ("no my bike lights don't work", {"82", "83", "84", "85", "77"}, []),
+    ],
     "hindi + multi-question": [
         ("टायर प्रेशर कितना होना चाहिए?", {"100"}, ["25"]),
         ("What's the tank capacity and the kerb weight?", {"99"}, ["9", "99"]),
@@ -180,6 +187,7 @@ def holdout_live(index, dataset=None):
                 good, verdict = declined, ("declined correctly" if declined else "SHOULD HAVE DECLINED")
             else:
                 missing = [m for m in must if m.lower() not in low]
+                missing += [f"contains '{f}'" for f in QUALITY.get(msg, {}).get("forbid", []) if f.lower() in low]
                 good = bool(cited & expected) and not missing
                 verdict = "OK" if good else f"CHECK (cited {sorted(cited)}, want {sorted(expected)}" + \
                           (f", missing {missing})" if missing else ")")
@@ -197,6 +205,8 @@ def holdout_live(index, dataset=None):
 
 # Answer-quality checks for the live run (beyond "cited the right page")
 QUALITY = {
+    "lights don't work": {"forbid": ["tank capacity", "fuel fill cap", "9.0 litres"]},
+    "no my bike lights don't work": {"forbid": ["tank capacity", "fuel fill cap", "9.0 litres"]},
     "and when should I get it checked?": {"no_steps": True, "must": ["1,000"]},
     "What is the tyre pressure?": {"no_steps": True, "must": ["32", "36"]},
     "is it the same with a pillion?": {"no_steps": True, "must": ["36"]},

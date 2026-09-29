@@ -32,7 +32,7 @@ SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
 CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))
 WEAK_SCORE = float(os.getenv("WEAK_SCORE", "9"))  # first question matched weakly -> let the planner reword it  # strong match -> never show a bare refusal
-PROMPT_VERSION = "p11"    # bump whenever prompts/format change -> old cached answers are ignored
+PROMPT_VERSION = "p12"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
@@ -46,13 +46,16 @@ Rules:
 - Keep the owner's symptom and context: after "my bike won't start", "the lights are dim too" -> "engine does not start lights dim weak horn".
 - Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance', 'fuel tank capacity' (not petrol), 'kerb weight' (not how heavy), 'running in period', 'malfunction indicator lamp', 'navigation bluetooth app'.
 - Do NOT add words like 'motorcycle', 'symptoms', 'troubleshooting', and do NOT guess causes or parts (no 'alternator', 'voltage').
-- If the latest message starts a new topic, do NOT carry over the old topic."""
+- If the latest message names its own subject ('lights don't work', 'how to put petrol'), it is a NEW topic: every query must be about that subject only; never carry over the previous topic.
+- A message starting with 'no' / 'not that' is a correction: answer the new request, drop the previous topic.
+- A short reply right after the assistant listed checks (e.g. 'no petrol' after 'check there is petrol in the tank') answers that check: rewrite it as the next question, e.g. 'The fuel tank is empty. How do I refuel?'.""" 
 
 ANSWER_SYS = """You are a service advisor answering a motorcycle owner using ONLY the manual SECTIONS provided.
 Return JSON: {"parts": [one object per question under QUESTIONS, same order], "not_covered": "..."}.
 Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "warnings"} where the lists hold {"text", "page"} items.
 - found=true whenever ANY section contains information relevant to that question; give what the manual says, even if partial. found=false only if no section is about it.
 - summary: one plain sentence that directly answers that question.
+- For a problem/symptom, start with the checks from the troubleshooting section; add a procedure from another section (e.g. a flooded-engine starting method) only if the troubleshooting text points to it.
 - Read each question by its obvious intent (e.g. 'change the engine oil grade' means change the engine oil).
 - Answer ONLY what was asked. 'What is / how much / when / how often' questions: give spec and summary, and leave steps empty. 'How do I / what should I check' questions: give steps. 'What if X can't be done' questions: give the manual's advice for that case (e.g. visit a service centre), not the whole procedure again.
 - Ignore sections that are not about the question (e.g. riding or gear-shifting steps for a starting problem, bulb replacement for dim lights caused by a weak battery).
@@ -148,11 +151,26 @@ def is_dangling(question: str, history: list[dict]) -> bool:
     return has_history(history) and bool(DANGLING_RE.search(question.lower()))
 
 
+def guard_topic_bleed(q_en: str, queries: list[str], history: list[dict], lang: str) -> list[str]:
+    """Deterministic guard: when the message names its own subject (not a dangling 'is it the same?'),
+    drop planner queries that share no words with it - e.g. 'fuel tank capacity' suggested for
+    'lights don't work'. Owner->manual synonyms count as shared words (petrol ~ fuel)."""
+    from rag import tokenize, expansion_terms
+    if lang != "en-IN" or not has_history(history) or is_dangling(q_en, history):
+        return queries
+    own = set(tokenize(q_en)) | set(tokenize(expansion_terms(q_en)))
+    own -= {"bike", "motorcycl", "vehicl", "problem", "issu", "work", "doe", "help"}
+    if not own:
+        return queries
+    kept = [q for q in queries if own & (set(tokenize(q)) | set(tokenize(expansion_terms(q))))]
+    return kept or [q_en]
+
+
 def split_on_and(q: str) -> list[str]:
     """'My ABS light is on and the bike won't start' -> two parts, if each part has its own subject."""
     from rag import tokenize
     parts = [x.strip(" ,.?") for x in re.split(r"\s+and\s+", q) if x.strip()]
-    if 2 <= len(parts) <= 3 and all(len(tokenize(x)) >= 2 for x in parts):
+    if 2 <= len(parts) <= 3 and all(len(tokenize(x)) >= 1 and len(x.split()) >= 3 for x in parts):
         return parts
     return []
 
@@ -412,6 +430,18 @@ def _normalise(data: dict) -> dict:
     return {"parts": [], "not_covered": data.get("not_covered", "")}
 
 
+def _near_dup(a: set, b: set) -> bool:
+    """'Wait for 10 seconds before trying again' ~ 'Wait 10 seconds before repeating': same numbers
+    and most words shared (numbers must match exactly, so 10 Nm vs 20 Nm are never merged)."""
+    if not a or not b:
+        return False
+    na, nb = {w for w in a if w.replace(".", "").isdigit()}, {w for w in b if w.replace(".", "").isdigit()}
+    if na != nb:
+        return False
+    overlap = len(a & b) / min(len(a), len(b))
+    return overlap >= (0.75 if na else 0.85)
+
+
 SPEC_TOKEN = re.compile(r"\d|\b(sae|api|jaso|psi|bar|mm|km|nm|litre|liter|ml|volt|amp|synthetic|mineral|grade|dot)\b", re.I)
 CAPS = {"spec": 4, "steps": 8, "warnings": 3, "service_centre": 2}
 _W = re.compile(r"[a-z0-9]+")
@@ -526,8 +556,9 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
             keep = []
             for t, p in lst:
                 from rag import tokenize
-                key = " ".join(sorted(set(tokenize(t)) | set(re.findall(r"\d+(?:\.\d+)?", t)))) or t.lower()
-                if key in seen:
+                toks = set(tokenize(t)) | set(re.findall(r"\d+(?:\.\d+)?", t))
+                key = " ".join(sorted(toks)) or t.lower()
+                if key in seen or any(_near_dup(toks, set(k.split())) for k in seen):
                     continue
                 seen.add(key); keep.append((t, p))
             out.append(keep)
@@ -640,6 +671,7 @@ def answer(client, index: Index, question: str, history: list[dict], *,
         # planner echoed the message back ('the lights are dim too'): carry the previous topic
         queries = [f"{q} {prev_q}" for q in queries]
         standalone = f"{q_en.rstrip('.?! ')} (following up on: {prev_q})"
+    queries = guard_topic_bleed(q_en, queries, history, lang)
     if len(queries) == 1 and " and " in q_en.lower():
         parts = split_on_and(q_en)
         if parts:                                   # planner merged two symptoms/topics: split them
