@@ -28,10 +28,10 @@ CONVERSATIONS = {
     ],
     "topic switches": [
         ("What is the tyre pressure?", ["tyre pressure"], {"71"}),
-        ("is it the same with a pillion?", ["tyre pressure with pillion"], {"71"}),
+        ("is it the same with a pillion?", ["tyre pressure with pillion"], {"16", "71", "104"}),
         ("And the engine oil grade?", ["engine oil grade"], {"19"}),
         ("how often should I change it?", ["engine oil replace periodical maintenance"], {"111"}),
-        ("How much chain slack is allowed?", ["drive chain slackness"], {"84"}),
+        ("How much chain slack is allowed?", ["drive chain slackness"], {"83", "84"}),
     ],
     "multi-question in one message": [
         ("What is the tyre pressure and which engine oil should I use?", ["tyre pressure", "engine oil grade"], {"71", "19"}),
@@ -51,8 +51,10 @@ QUALITY = {
     "What is the tyre pressure?": {"no_steps": True, "must": ["32", "36"]},
     "is it the same with a pillion?": {"no_steps": True, "must": ["36"]},
     "And the engine oil grade?": {"no_steps": True, "must": ["15W"]},
-    "how often should I change it?": {"must": ["10"], "forbid": ["every 1,000 km or 1.5"]},
+    "how often should I change it?": {"must": ["10"], "forbid": ["every 1,000 km or 1.5", "here is what the manual says"]},
     "the lights are dim too": {"avoid_pages": {"27", "91", "92"}, "must": ["battery"]},
+    "My ABS light is on and the bike won't start": {"must": ["ABS", "fuel"]},
+    "What is the tyre pressure and which engine oil should I use?": {"no_steps": True, "must": ["36", "15W"]},
     "My bike won't start": {"avoid_text": ["back and forth"]},
 }
 

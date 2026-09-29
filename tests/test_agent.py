@@ -303,3 +303,48 @@ def test_lazy_planner_echo_still_carries_context():
          {"role": "assistant", "content": "x", "summary": "condensation"}]
     r = agent.answer(Lazy(), idx(), "What should I do if it keeps happening?", h)
     assert "white smoke" in r.queries[0] and "following up on" in r.standalone
+
+
+# ---------- regressions from live eval run #4 ----------
+def test_connective_start_is_not_a_dangling_followup():
+    """'And the engine oil grade?' names its own subject: don't glue the tyre question onto it."""
+    class Echo(FakeSarvam):
+        def chat_json(self, *a, **k):
+            self.calls.append("plan"); return {"standalone": "What is the engine oil grade?", "queries": ["engine oil grade"]}
+    h = [{"role": "user", "content": "is it the same with a pillion?", "standalone": "What is the tyre pressure with a pillion?"},
+         {"role": "assistant", "content": "x", "summary": "36 psi"}]
+    r = agent.answer(Echo(), idx(), "And the engine oil grade?", h)
+    assert r.queries == ["engine oil grade"] and "tyre" not in r.standalone.lower()
+
+def test_two_symptoms_joined_by_and_are_split():
+    class Merge(FakeSarvam):
+        def chat_json(self, *a, **k):
+            self.calls.append("plan"); return {"standalone": "ABS light on and bike won't start", "queries": ["ABS light on engine does not start"]}
+    r = agent.answer(Merge(), idx(), "My ABS light is on and the bike won't start", [])
+    assert r.queries == ["My ABS light is on", "the bike won't start"]
+
+def test_info_questions_get_no_steps_and_offtopic_warnings_dropped():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "engine oil grade", "found": True, "summary": "Use SAE 15W 50.", "_info": True,
+          "_q": "engine oil grade",
+          "spec": [P("SAE 15W 50 API SL", "2"), P("Endurance Gabriel Semi Synthetic", "2")],
+          "steps": [P("Check oil level on center stand", "3")], "service_centre": [],
+          "warnings": [P("Wrong oil grade reduces engine life", "2"),
+                       P("Do not attempt to shift gears without moving back and forth", "2")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"2", "3"})
+    assert "🔧" not in md and "Endurance Gabriel Semi Synthetic" in md.split("**📏")[1]
+    assert "oil grade reduces" in md and "back and forth" not in md
+
+def test_duplicate_by_meaning_removed():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "fuse", "found": True, "summary": "s", "spec": [], "service_centre": [], "warnings": [],
+          "steps": [P("Replace fuse with same rating", "8"), P("Open side panel", "9"), P("Replace the fuse with the same rating", "8")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"8", "9"})
+    assert md.lower().count("same rating") == 1
+
+def test_steps_differing_only_by_number_are_kept():
+    P = lambda t, p: {"text": t, "page": p}
+    d = {"parts": [{"question": "q", "found": True, "summary": "s", "spec": [], "service_centre": [], "warnings": [],
+          "steps": [P("Tighten nut to 10 Nm", "8"), P("Tighten nut to 20 Nm", "8")]}]}
+    md, _, _ = agent.render(d, "en-IN", {"8"})
+    assert "10 Nm" in md and "20 Nm" in md

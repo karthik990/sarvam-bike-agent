@@ -31,7 +31,7 @@ MAX_SECTIONS = 5         # hard cap on sections in one prompt
 SECTION_CHARS = 1200     # cap per section
 MAX_PARTS = 3
 CONFIDENT_SCORE = float(os.getenv("CONFIDENT_SCORE", "8"))  # strong match -> never show a bare refusal
-PROMPT_VERSION = "p10"    # bump whenever prompts/format change -> old cached answers are ignored
+PROMPT_VERSION = "p11"    # bump whenever prompts/format change -> old cached answers are ignored
 PLAN_ALWAYS = os.getenv("PLAN_ALWAYS", "0") == "1"
 
 # ---------------------------------------------------------------- prompts
@@ -41,7 +41,7 @@ Given the recent conversation and the owner's LATEST message, return JSON:
  "queries": ["<short search query in owner's-manual wording>"],
  "language": "<BCP-47 code of the language the latest message is written in, e.g. en-IN, hi-IN, kn-IN>"}
 Rules:
-- Usually ONE query. Use 2-3 only if the latest message asks clearly different things (e.g. tyre pressure AND engine oil).
+- Usually ONE query. Use 2-3 when the latest message asks about different things or reports different symptoms joined by 'and' (e.g. 'tyre pressure' + 'engine oil grade'; 'ABS lamp continuously on' + 'engine does not start').
 - Keep the owner's symptom and context: after "my bike won't start", "the lights are dim too" -> "engine does not start lights dim weak horn".
 - Use words an owner's manual uses: 'engine does not start', 'tyre pressure', 'engine oil grade', 'drive chain slackness', 'fuse blown', 'periodical maintenance'.
 - Do NOT add words like 'motorcycle', 'symptoms', 'troubleshooting', and do NOT guess causes or parts (no 'alternator', 'voltage').
@@ -52,6 +52,7 @@ Return JSON: {"parts": [one object per question under QUESTIONS, same order], "n
 Each part: {"question", "found", "summary", "spec", "steps", "service_centre", "warnings"} where the lists hold {"text", "page"} items.
 - found=true whenever ANY section contains information relevant to that question; give what the manual says, even if partial. found=false only if no section is about it.
 - summary: one plain sentence that directly answers that question.
+- Read each question by its obvious intent (e.g. 'change the engine oil grade' means change the engine oil).
 - Answer ONLY what was asked. 'What is / how much / when / how often' questions: give spec and summary, and leave steps empty. 'How do I / what should I check' questions: give steps. 'What if X can't be done' questions: give the manual's advice for that case (e.g. visit a service centre), not the whole procedure again.
 - Ignore sections that are not about the question (e.g. riding or gear-shifting steps for a starting problem, bulb replacement for dim lights caused by a weak battery).
 - spec: ONLY numbers, limits, grades or intervals (e.g. free play 10-12 mm; replace at 10 thousand km). Actions go in steps.
@@ -137,6 +138,24 @@ class Result:
 FOLLOWUP_RE = re.compile(
     r"^(and|also|so|then|ok|okay|but|what about|how about|same|next)\b|"
     r"\b(it|its|that|this|those|these|them|they|there|same|other one|previous|above|step \d+|again|too|as well|also)\b")
+DANGLING_RE = re.compile(r"\b(it|its|that|this|those|these|them|they|same|other one|too|as well|step \d+)\b")
+
+
+def is_dangling(question: str, history: list[dict]) -> bool:
+    """True when the message can't be understood alone ('is it the same?', 'the lights are dim too').
+    A message that merely starts with 'And/Also/What about' but names its own subject is NOT dangling."""
+    return has_history(history) and bool(DANGLING_RE.search(question.lower()))
+
+
+def split_on_and(q: str) -> list[str]:
+    """'My ABS light is on and the bike won't start' -> two parts, if each part has its own subject."""
+    from rag import tokenize
+    parts = [x.strip(" ,.?") for x in re.split(r"\s+and\s+", q) if x.strip()]
+    if 2 <= len(parts) <= 3 and all(len(tokenize(x)) >= 2 for x in parts):
+        return parts
+    return []
+
+
 MULTI_RE = re.compile(r"\?.*\S.*\?|\band (what|how|which|when|why|where|is|are|can|should|do|does)\b|;|\balso\b", re.I)
 
 
@@ -363,13 +382,37 @@ def _normalise(data: dict) -> dict:
     return {"parts": [], "not_covered": data.get("not_covered", "")}
 
 
-SPEC_TOKEN = re.compile(r"\d|\b(sae|api|jaso|psi|bar|mm|km|nm|litre|liter|ml|volt|amp)\b", re.I)
+SPEC_TOKEN = re.compile(r"\d|\b(sae|api|jaso|psi|bar|mm|km|nm|litre|liter|ml|volt|amp|synthetic|mineral|grade|dot)\b", re.I)
 CAPS = {"spec": 4, "steps": 8, "warnings": 3, "service_centre": 2}
 _W = re.compile(r"[a-z0-9]+")
 
 
 def _words(t: str) -> set[str]:
     return {w for w in _W.findall(t.lower()) if len(w) > 2 or w.isdigit()}
+
+
+INFO_RE = re.compile(r"^\s*(what is|what are|what's|which|how much|how many|how often|when|is it|is the|are the|does|do i need)\b|"
+                     r"\b(how often|interval|grade|pressure|capacity|specification)\b", re.I)
+ACTION_RE = re.compile(r"\b(how do|how to|how can|what should i (do|check)|what to do|what if|adjust|fix|replace|remove|"
+                       r"install|clean|can'?t|cannot|won'?t|doesn'?t|not (start|work)|dim|noise|smoke|leak|slip|"
+                       r"overheat|light is on|lamp is on|stays on|blown)\b", re.I)
+
+
+def is_info_question(q: str) -> bool:
+    """'What is the tyre pressure / which oil / how often' -> facts only (no procedure steps).
+    'When should I get it checked' is info (the interval), not a request for the procedure."""
+    q = q or ""
+    if re.search(r"\b(how often|interval|when should|when to)\b", q, re.I):
+        return True
+    return bool(INFO_RE.search(q)) and not ACTION_RE.search(q)
+
+
+def relevant_warnings(warn, context: str):
+    """Keep a warning only if it shares a content word with the question/answer (drops e.g. a
+    gear-shifting caution attached to a starting problem)."""
+    from rag import tokenize
+    ctx = set(tokenize(context))
+    return [(t, p) for t, p in warn if set(tokenize(t)) & ctx]
 
 
 def tidy(spec, steps, warn, svc):
@@ -447,7 +490,8 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
         for lst in lists:
             keep = []
             for t, p in lst:
-                key = re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
+                from rag import tokenize
+                key = " ".join(sorted(set(tokenize(t)) | set(re.findall(r"\d+(?:\.\d+)?", t)))) or t.lower()
                 if key in seen:
                     continue
                 seen.add(key); keep.append((t, p))
@@ -457,6 +501,11 @@ def render(data: dict, lang: str, allowed: set[str], sources=None, pdf2label=Non
     for n, part in enumerate(parts, 1):
         spec, steps, warn, svc = tidy(*dedupe([items(part, "spec"), items(part, "steps"),
                                                 items(part, "warnings"), items(part, "service_centre")]))
+        if part.get("_info"):
+            steps = []                                   # facts question: no procedure dump
+        ctx_words = " ".join([str(part.get("question", "")), str(part.get("_q", "")), str(part.get("summary", ""))]
+                             + [t for t, _ in spec + steps + svc])
+        warn = relevant_warnings(warn, ctx_words)
         md = []
         if len(parts) > 1:
             md.append(f"#### {n}. {str(part.get('question', '')).strip() or 'Question ' + str(n)}")
@@ -552,15 +601,19 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     prev_u = next((m for m in reversed(history) if m["role"] == "user"), {})
     prev_q = (prev_u.get("standalone") or prev_u.get("content", ""))[:200]
     norm = lambda t: re.sub(r"[^a-z0-9]+", " ", t.lower()).strip()
-    if prev_q and is_followup(question, history) and len(_words(standalone) - _words(q_en)) < 2:
+    if prev_q and is_dangling(question, history) and len(_words(standalone) - _words(q_en)) < 2:
         # planner echoed the message back ('the lights are dim too'): carry the previous topic
         queries = [f"{q} {prev_q}" for q in queries]
         standalone = f"{q_en.rstrip('.?! ')} (following up on: {prev_q})"
+    if len(queries) == 1 and " and " in q_en.lower():
+        parts = split_on_and(q_en)
+        if parts:                                   # planner merged two symptoms/topics: split them
+            queries = parts
     followup = is_followup(question, history) or (has_history(history) and standalone.lower() != q_en.lower())
 
     # 3) retrieve per question
     prev = next((m for m in reversed(history) if m["role"] == "user"), {})
-    ctx_hint = (prev.get("standalone") or prev.get("content", ""))[:200] if is_followup(question, history) else ""
+    ctx_hint = (prev.get("standalone") or prev.get("content", ""))[:200] if is_dangling(question, history) else ""
     sections, hits, per_query = retrieve(index, queries, img_desc, ctx_hint)
     if ctx_hint:
         sections = sections[:MAX_SECTIONS - 1]           # reserve one slot for the context section
@@ -618,6 +671,12 @@ def answer(client, index: Index, question: str, history: list[dict], *,
     data = _normalise(data)
     if not any(pt.get("found") for pt in data["parts"]):
         return fail(f"model marked every question not found (finish_reason={fin})")
+
+    # intent per part: facts-only questions get no procedure steps
+    for i, pt in enumerate(data["parts"]):
+        q_i = standalone if len(queries) == 1 else (queries[i] if i < len(queries) else str(pt.get("question", "")))
+        pt["_q"] = q_i
+        pt["_info"] = is_info_question(q_i)
 
     # 5) local render + citation check
     allowed = {l for s in sections for l in s["labels"]}
